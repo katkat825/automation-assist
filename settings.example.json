@@ -1,0 +1,31 @@
+{
+  "sql": {
+    "server": "",
+    "database": "",
+    "username": "",
+    "password": "",
+    "trusted_connection": true
+  },
+  "qa": {
+    "screenshot_dir": "C:/Users/<you>/automation-assist-screenshots",
+    "headless": false
+  },
+  "website": {
+    "wp_admin_url": "https://example.com/wp-admin",
+    "wp_username": "",
+    "wp_password": "",
+    "headless": true,
+    "live_url": "https://example.com",
+    "staging_url": "",
+    "sample_pages": [
+      "https://example.com/"
+    ]
+  },
+  "ui": {
+    "font_size": 0
+  },
+  "regression": {
+    "project_dir": "",
+    "run_log_url": ""
+  }
+}

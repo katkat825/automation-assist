@@ -1,0 +1,13 @@
+# Runtime
+PySide6>=6.7.0            # Qt UI
+playwright>=1.44.0        # browser automation (WordPress, SCORM runtime, regression)
+requests>=2.31.0          # site health checks
+beautifulsoup4>=4.12.0    # HTML parsing for site health checks
+pyspellchecker>=0.8.1     # spelling / acronym checks
+
+# Test
+pytest>=8.0
+
+# Build (only needed to produce the Windows executable via build.py)
+pyinstaller>=6.0
+pywin32>=306              # PyInstaller dependency on Windows; not imported by the app

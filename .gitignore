@@ -1,0 +1,80 @@
+# Secrets / local config
+# Broad on purpose: settings.example.json is the ONLY settings file that ships.
+settings.json
+settings.*.json
+settings.json.*
+!settings.example.json
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.bak
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# PyInstaller
+build/
+dist/
+*.manifest
+*.spec.bak
+
+# Playwright
+playwright-report/
+test-results/
+.playwright/
+
+# Databases / local state
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+history.db
+
+# QA / automation outputs
+current_qa/
+screenshots/
+automation-assist-screenshots/
+*.scorm.zip
+scorm_trace*.json
+
+# Logs
+*.log
+logs/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Other
+examples/
+docs/
+od_regress_tests/
