@@ -5,11 +5,25 @@ false-positive behaviour matters as much as their detection: a check that
 cries wolf gets ignored.
 """
 
+from app.automation.scorm.checks import text_checks
 from app.automation.scorm.checks.text_checks import (
+    _is_known_compound,
     check_duplicates,
     check_whitespace_and_spelling,
 )
 from tests.conftest import make_data, make_slide
+
+
+class _FakeChecker:
+    """Stand-in for pyspellchecker so these tests run without the library
+    (and its dictionary) installed. ``known`` mirrors the real method: it
+    returns the subset of the given words that are 'known'."""
+
+    def __init__(self, vocabulary):
+        self._vocab = {w.lower() for w in vocabulary}
+
+    def known(self, words):
+        return {w for w in words if w.lower() in self._vocab}
 
 LONG_A = "This is a sufficiently long paragraph of body copy used for duplicate detection."
 LONG_B = "An entirely different paragraph that also comfortably exceeds the length floor."
@@ -133,3 +147,78 @@ def test_skip_spelling_flag_suppresses_the_spelling_pass():
 def test_empty_course_does_not_crash():
     sec = check_whitespace_and_spelling(make_data([]), skip_spelling=True)
     assert sec.title
+
+
+# --- em-dash / hyphen: dictionary-based compound suppression --------------
+#
+# The unspaced-hyphen-pair rule flags "word-word" as a *possible* missed
+# em-dash. Legitimate compounds whose parts are all real dictionary words are
+# suppressed (English courses only) so the hand-maintained allowlist doesn't
+# have to enumerate every compound. See text_checks._is_known_compound.
+
+def test_is_known_compound_all_parts_known():
+    checker = _FakeChecker({"customer", "focused"})
+    assert _is_known_compound(["customer", "focused"], checker) is True
+
+
+def test_is_known_compound_with_unknown_part():
+    checker = _FakeChecker({"customer"})  # "focused" not in vocab
+    assert _is_known_compound(["customer", "focused"], checker) is False
+
+
+def test_is_known_compound_without_a_checker():
+    assert _is_known_compound(["customer", "focused"], None) is False
+
+
+def test_is_known_compound_ignores_short_and_numeric_parts():
+    """Single letters and numbers shouldn't disqualify a real compound."""
+    checker = _FakeChecker({"learning"})
+    assert _is_known_compound(["e", "learning"], checker) is True
+    assert _is_known_compound(["top", "10"], _FakeChecker({"top"})) is True
+
+
+def test_known_compound_is_not_flagged_as_missed_em_dash(monkeypatch):
+    monkeypatch.setattr(
+        text_checks, "_get_spell_checker",
+        lambda: _FakeChecker({"customer", "focused"}),
+    )
+    data = make_data([make_slide(texts=["We take a customer-focused approach."])])
+    body = "\n".join(
+        i.message for i in check_whitespace_and_spelling(data, skip_spelling=False).items
+    )
+    assert "customer-focused" not in body
+
+
+def test_unknown_hyphenated_pair_is_still_flagged(monkeypatch):
+    monkeypatch.setattr(
+        text_checks, "_get_spell_checker",
+        lambda: _FakeChecker({"customer"}),  # second part unknown
+    )
+    data = make_data([make_slide(texts=["A strange foo-zzz token here."])])
+    warned = warns(check_whitespace_and_spelling(data, skip_spelling=False))
+    assert any("foo-zzz" in w for w in warned)
+
+
+def test_non_english_course_does_not_use_the_dictionary(monkeypatch):
+    """skip_spelling (non-English) keeps the old allowlist-only behaviour so an
+    English dictionary can't wrongly clear a foreign compound."""
+    calls = []
+    monkeypatch.setattr(
+        text_checks, "_get_spell_checker",
+        lambda: calls.append(1) or _FakeChecker({"customer", "focused"}),
+    )
+    data = make_data([make_slide(texts=["We take a customer-focused approach."])])
+    warned = warns(check_whitespace_and_spelling(data, skip_spelling=True))
+    assert any("customer-focused" in w for w in warned)
+    assert calls == []  # checker never built when spelling is skipped
+
+
+def test_spaced_hyphen_em_dash_flags_regardless_of_dictionary(monkeypatch):
+    """The double/spaced-hyphen signal is independent of the compound check."""
+    monkeypatch.setattr(
+        text_checks, "_get_spell_checker",
+        lambda: _FakeChecker({"plan", "we", "regrouped"}),
+    )
+    data = make_data([make_slide(texts=["The plan failed -- we regrouped."])])
+    warned = warns(check_whitespace_and_spelling(data, skip_spelling=False))
+    assert warned  # spaced/double hyphen still surfaces

@@ -10,8 +10,9 @@ from app.automation.scorm.checks.course_checks import (
     check_questions,
     check_scorm_api,
     check_video_speed,
+    order_choices_by_label,
 )
-from app.automation.scorm.parser import StoryData
+from app.automation.scorm.parser import Choice, StoryData
 from tests.conftest import GOOD_SCORMDRIVER_JS, make_data, make_interaction, make_slide
 
 
@@ -146,6 +147,78 @@ def test_questions_lists_each_interaction():
 def test_questions_handles_a_course_with_none():
     sec = check_questions(make_data([make_slide()]))
     assert sec.items  # says something rather than returning empty
+
+
+# --- answer-choice ordering (order_choices_by_label) ----------------------
+
+def _labeled(letter_text_pairs, correct_id):
+    """Build an interaction whose choices carry the given texts."""
+    choices = [Choice(id=cid, text=txt) for cid, txt in letter_text_pairs]
+    return make_interaction(choices=choices, correct_choice_ids=[correct_id])
+
+
+def test_lettered_choices_are_reordered_to_match_screen():
+    # Stored out of order: B, A, C -> should display A, B, C.
+    ia = _labeled(
+        [("c2", "B. Second"), ("c1", "A. First"), ("c3", "C. Third")],
+        correct_id="c1",
+    )
+    ordered, verified = order_choices_by_label(ia)
+    assert verified is True
+    assert [c.text for c in ordered] == ["A. First", "B. Second", "C. Third"]
+
+
+def test_reordering_keeps_the_correct_answer_attached():
+    ia = _labeled(
+        [("c2", "B. Second"), ("c1", "A. First")],
+        correct_id="c1",
+    )
+    data = make_data([make_slide(interactions=[ia])])
+    body = text_of(check_questions(data))
+    # The ✓ must sit on "A. First", now shown first.
+    first_line = [l for l in body.splitlines() if "First" in l][0]
+    assert "✓" in first_line
+    assert "ORDER UNVERIFIED" not in body
+
+
+def test_numeric_labels_are_also_ordered():
+    ia = _labeled(
+        [("c2", "2. Two"), ("c1", "1. One"), ("c3", "3. Three")],
+        correct_id="c1",
+    )
+    ordered, verified = order_choices_by_label(ia)
+    assert verified is True
+    assert [c.text for c in ordered] == ["1. One", "2. Two", "3. Three"]
+
+
+def test_unlabeled_choices_are_marked_unverified():
+    ia = _labeled(
+        [("c1", "Chocolate"), ("c2", "Vanilla")],
+        correct_id="c1",
+    )
+    _, verified = order_choices_by_label(ia)
+    assert verified is False
+    data = make_data([make_slide(interactions=[ia])])
+    assert "ORDER UNVERIFIED" in text_of(check_questions(data))
+
+
+def test_partial_or_broken_label_sequence_is_unverified():
+    # One choice unlabelled -> can't trust order.
+    ia = _labeled([("c1", "A. First"), ("c2", "Second")], correct_id="c1")
+    assert order_choices_by_label(ia)[1] is False
+    # Gap in the sequence (A, C) -> can't trust order.
+    ia2 = _labeled([("c1", "A. First"), ("c2", "C. Third")], correct_id="c1")
+    assert order_choices_by_label(ia2)[1] is False
+
+
+def test_true_false_is_not_nagged_about_order():
+    ia = make_interaction(
+        question_type="truefalse",
+        choices=[Choice(id="c1", text="True"), Choice(id="c2", text="False")],
+        correct_choice_ids=["c1"],
+    )
+    data = make_data([make_slide(interactions=[ia])])
+    assert "ORDER UNVERIFIED" not in text_of(check_questions(data))
 
 
 # --- video speed ----------------------------------------------------------

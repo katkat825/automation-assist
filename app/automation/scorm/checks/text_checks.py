@@ -32,6 +32,43 @@ try:
 except ImportError:
     _SPELLCHECKER_AVAILABLE = False
 
+# Lazy-built singleton — building the dictionary takes a beat. The hyphen-pair
+# rule and the spell check both want one, so build it at most once.
+_spell_checker = None
+
+
+def _get_spell_checker():
+    """Return a cached pyspellchecker SpellChecker, or None if unavailable."""
+    global _spell_checker
+    if _spell_checker is None and _SPELLCHECKER_AVAILABLE:
+        _spell_checker = _SpellChecker()
+    return _spell_checker
+
+
+def _is_known_compound(parts: list, checker) -> bool:
+    """
+    True when every word-like part of a hyphenated token is a real English
+    word — i.e. the token is an ordinary compound ("risk-based",
+    "decision-making"), not a hyphen standing in for an em-dash.
+
+    We only judge alphabetic parts of length >= 2; single letters and any
+    numeric/empty fragments are ignored (so "e-learning" or "top-10" are not
+    disqualified by their short part). A token with no judgeable part at all
+    returns False so it falls through to the existing heuristics.
+
+    This is a deliberate trade: an em-dash mistakenly written as an *unspaced*
+    single hyphen between two dictionary words (rare — those are usually typed
+    as "--" or " - ", which _WRONG_DASH_RE still catches) will now be treated
+    as a compound and not flagged. In exchange, the large hand-maintained
+    _HYPHEN_COMPOUND_OK list no longer has to enumerate every legitimate
+    compound a course might use.
+    """
+    if checker is None:
+        return False
+    judgeable = [p for p in parts if p.isalpha() and len(p) >= 2]
+    if not judgeable:
+        return False
+    return len(checker.known(judgeable)) == len(judgeable)
 
 
 def check_duplicates(data: ScormData, dual_path: bool = False) -> Section:
@@ -145,6 +182,12 @@ def check_whitespace_and_spelling(data: ScormData, skip_spelling: bool = False) 
     # have intentional spacing after the identifier — skip them for space checks.
     _answer_id = re.compile(r'^[A-Ha-h][\.\)]\s')
 
+    # Dictionary used to recognise ordinary hyphenated compounds so they are not
+    # flagged as possible missed em-dashes. Only for English courses — for a
+    # non-English course an English dictionary would mis-judge every compound,
+    # so we fall back to the hand-maintained allowlists alone.
+    hyphen_checker = None if skip_spelling else _get_spell_checker()
+
     for slide in data.slides:
         loc = _screen_num(slide)
         for text in slide.texts:
@@ -196,7 +239,8 @@ def check_whitespace_and_spelling(data: ScormData, skip_spelling: bool = False) 
                 parts = low.split("-")
                 if (low in _HYPHEN_COMPOUND_OK
                         or parts[0] in _HYPHEN_PREFIXES
-                        or parts[-1] in _HYPHEN_SUFFIXES):
+                        or parts[-1] in _HYPHEN_SUFFIXES
+                        or _is_known_compound(parts, hyphen_checker)):
                     continue
                 start = max(0, m.start() - 20)
                 end = min(len(text_no_urls), m.end() + 20)
@@ -232,9 +276,11 @@ def check_whitespace_and_spelling(data: ScormData, skip_spelling: bool = False) 
             "info",
             "Note: heuristic — double hyphens, spaced hyphens, and unspaced "
             "hyphenated word pairs are flagged as possible missed em-dashes. "
-            "Real compounds will also appear; add confirmed-good ones to "
-            "_HYPHEN_COMPOUND_OK (or a prefix/suffix set) in checks/wordlists.py "
-            "to silence them.",
+            "Compounds whose parts are all real dictionary words are now "
+            "auto-suppressed (English courses only), so most legitimate "
+            "compounds no longer appear here. If one still slips through — a "
+            "proper noun or coined term the dictionary doesn't know — add it to "
+            "_HYPHEN_COMPOUND_OK (or a prefix/suffix set) in checks/wordlists.py.",
         )
     else:
         sec.add("pass", "No misused hyphens detected where an em-dash may be intended")

@@ -719,6 +719,75 @@ def check_reading_order(data: ScormData) -> "Section":
 
 
 # ---------------------------------------------------------------------------
+# 8. Radio-button Tab-key instructions
+# ---------------------------------------------------------------------------
+# In the Accessible Path, a single-select question renders as a group of radio
+# buttons. When a JAWS user reaches the group and presses the Down arrow to
+# hear the next option, the radio group SELECTS that option instead of just
+# moving to it — so an arrow press silently changes their answer. The
+# accessible fix courses use is on-screen text telling the learner to press
+# Tab (not the arrow keys) to move between choices. This check flags any
+# radio-button question whose slide is missing that guidance.
+#
+# Storyline question types: "multiplechoice" (one answer) and "truefalse" both
+# render as radio buttons; "multipleresponse" renders as checkboxes, where the
+# arrow-selects-next problem does not occur, so it is exempt.
+_RADIO_QUESTION_TYPES = {"multiplechoice", "truefalse"}
+
+# On-screen guidance counts when the text mentions the Tab key alongside an
+# arrow/select/move/key context — loose enough to match real phrasings
+# ("Use the Tab key to move between answers", "Press Tab to review each option
+# before selecting"), tight enough that a stray "tab" elsewhere won't pass.
+_TAB_WORD_RE = re.compile(r"\btab\b", re.IGNORECASE)
+_TAB_CONTEXT_RE = re.compile(r"\b(arrow|select|selects|move|moving|key|keys|choice|choices|option|options|answer|answers)\b", re.IGNORECASE)
+
+
+def _is_radio_question(ia) -> bool:
+    """True for single-select questions that render as radio buttons."""
+    return (not ia.is_survey) and (ia.question_type in _RADIO_QUESTION_TYPES)
+
+
+def check_radio_tab_instructions(data: ScormData) -> "Section":
+    sec = Section("Radio-Button Tab Instructions (JAWS)")
+
+    checked = 0
+    flagged = 0
+
+    for slide in get_accessible_path_slides(data):
+        radio_qs = [ia for ia in slide.interactions if _is_radio_question(ia)]
+        if not radio_qs:
+            continue
+        checked += 1
+
+        slide_text = " ".join(slide.texts)
+        has_tab_guidance = bool(
+            _TAB_WORD_RE.search(slide_text) and _TAB_CONTEXT_RE.search(slide_text)
+        )
+        if not has_tab_guidance:
+            flagged += 1
+            loc = _slide_label(slide)
+            q_label = radio_qs[0].question_text[:50] or radio_qs[0].lms_id or "(unnamed)"
+            sec.add(
+                "warn",
+                f'Radio-button question "{q_label}" has no on-screen Tab-key '
+                f"instruction — a JAWS user pressing the Down arrow will select "
+                f"the next answer instead of just moving to it. Add text telling "
+                f"the learner to use the Tab key to move between choices. ({loc})"
+            )
+
+    if checked == 0:
+        sec.add("info", "No radio-button questions found in the Accessible Path")
+    elif flagged == 0:
+        sec.add(
+            "pass",
+            f"All {checked} radio-button question slide(s) include on-screen "
+            "Tab-key guidance"
+        )
+
+    return sec
+
+
+# ---------------------------------------------------------------------------
 # Helpers shared by other JAWS checks above
 # ---------------------------------------------------------------------------
 
@@ -750,6 +819,7 @@ def run_jaws_checks(data: ScormData) -> list:
         check_slide_titles(data),
         check_keyboard_navigation(data),
         check_reading_order(data),
+        check_radio_tab_instructions(data),
         # check_dialog_labels(data),
         # ^ Disabled by team practice: JAWS announcing "modal dialog" without a
         # name is currently acceptable. Re-enable if that policy changes.

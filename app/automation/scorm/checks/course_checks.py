@@ -236,10 +236,68 @@ def check_menu(data: ScormData) -> Section:
 # 5. Questions & answers
 # ---------------------------------------------------------------------------
 
+# Leading answer-choice label: a single letter or a 1-2 digit number followed
+# by "." or ")" and a space — "A. ", "b) ", "1. ", "10) ".
+_CHOICE_LABEL_RE = re.compile(r'^\s*([A-Za-z]|\d{1,2})[\.\)]\s')
+
+
+def _choice_label_key(text: str):
+    """Return a sort key for a choice's leading label, or None if it has none.
+
+    Letters sort as ('a', 'A'); numbers as ('n', <int>). The family tag keeps
+    a course that mixes styles from being treated as an ordered set.
+    """
+    m = _CHOICE_LABEL_RE.match(text or "")
+    if not m:
+        return None
+    tok = m.group(1)
+    if tok.isdigit():
+        return ("n", int(tok))
+    return ("a", tok.upper())
+
+
+def order_choices_by_label(interaction):
+    """
+    Approximate the on-screen order of a question's answer choices from their
+    leading labels.
+
+    The data file stores choices in authoring order, which is not always the
+    order shown on screen. Most courses letter their options (A, B, C ...), so
+    when every choice carries a clean, complete, non-repeating label sequence
+    we can sort by it and match the screen. When they don't, we can't tell —
+    so we return the original order and report it as unverified.
+
+    Returns (ordered_choices, is_verified).
+    """
+    choices = interaction.choices
+    keys = [_choice_label_key(c.text) for c in choices]
+
+    if len(choices) < 2 or any(k is None for k in keys):
+        return choices, False
+    if len({k[0] for k in keys}) != 1:          # mixed letter/number styles
+        return choices, False
+
+    values = [k[1] for k in keys]
+    if len(set(values)) != len(values):          # duplicate labels
+        return choices, False
+
+    if keys[0][0] == "a":
+        expected = [chr(ord("A") + i) for i in range(len(values))]  # A, B, C ...
+    else:
+        start = min(values)
+        expected = list(range(start, start + len(values)))          # n, n+1 ...
+    if sorted(values) != expected:               # gap, or doesn't start clean
+        return choices, False
+
+    ordered = [c for _, c in sorted(zip(keys, choices), key=lambda p: p[0][1])]
+    return ordered, True
+
+
 def check_questions(data: ScormData) -> Section:
     sec = Section("Questions & Correct Answers")
 
     q_count = 0
+    unverified = 0
     for slide in data.slides:
         for ia in slide.interactions:
             if ia.is_survey:
@@ -247,10 +305,24 @@ def check_questions(data: ScormData) -> Section:
             q_count += 1
 
             loc = _screen_num(slide)
-            sec.add("info", f"[{loc}]  ({ia.question_type})")
+            ordered, verified = order_choices_by_label(ia)
+
+            # True/False order is trivial and rarely mislabelled, so we don't
+            # nag about it; every other unlabelled question gets a marker so
+            # the reviewer knows to confirm the on-screen order themselves.
+            if verified or ia.question_type == "truefalse":
+                sec.add("info", f"[{loc}]  ({ia.question_type})")
+            else:
+                unverified += 1
+                sec.add(
+                    "warn",
+                    f"[{loc}]  ({ia.question_type})  * ORDER UNVERIFIED — options "
+                    "have no sequential A/B/C labels, so the order below may not "
+                    "match the screen; confirm manually",
+                )
             sec.add("info", f"  Q: {ia.question_text[:300]}")
 
-            for choice in ia.choices:
+            for choice in ordered:
                 marker = "✓" if choice.id in ia.correct_choice_ids else " "
                 sec.add("info", f"  [{marker}] {choice.text[:200]}")
 
@@ -258,6 +330,12 @@ def check_questions(data: ScormData) -> Section:
         sec.add("info", "No graded questions found in the course data")
     else:
         sec.add("info", f"Total graded questions: {q_count}")
+        if unverified:
+            sec.add(
+                "info",
+                f"{unverified} question(s) marked ORDER UNVERIFIED — answers "
+                "shown in stored order, which may differ from the screen",
+            )
 
     return sec
 

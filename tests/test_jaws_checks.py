@@ -6,7 +6,13 @@ other accessibility check builds on, so it gets the most coverage here.
 """
 
 from app.automation.scorm import jaws_checks
-from tests.conftest import make_data, make_layer, make_obj, make_slide
+from tests.conftest import (
+    make_data,
+    make_interaction,
+    make_layer,
+    make_obj,
+    make_slide,
+)
 
 
 def std_slide(**kw):
@@ -171,3 +177,81 @@ def test_checks_tolerate_slides_with_layers_and_objects():
 
 def test_checks_tolerate_an_empty_course():
     assert jaws_checks.run_jaws_checks(make_data([])) is not None
+
+
+# --- radio-button Tab-key instructions -----------------------------------
+#
+# In the Accessible Path, a single-select question is a radio group; pressing
+# the Down arrow SELECTS the next option rather than just moving to it, so the
+# slide must tell the learner to use the Tab key. See
+# jaws_checks.check_radio_tab_instructions.
+
+TAB_TEXT = "Use the Tab key to move between the answer choices."
+
+
+def _radio_levels(data):
+    """Return the set of item levels in the radio-Tab section."""
+    sec = jaws_checks.check_radio_tab_instructions(data)
+    return sec, {item.level for item in sec.items}
+
+
+def test_radio_question_without_tab_text_is_flagged():
+    q = make_interaction(question_type="multiplechoice")
+    data = make_data([acc_slide(slide_id="a1", interactions=[q], texts=["Pick one."])])
+    sec, levels = _radio_levels(data)
+    assert "warn" in levels
+
+
+def test_radio_question_with_tab_text_passes():
+    q = make_interaction(question_type="multiplechoice")
+    data = make_data([
+        acc_slide(slide_id="a1", interactions=[q], texts=["Pick one.", TAB_TEXT])
+    ])
+    sec, levels = _radio_levels(data)
+    assert "warn" not in levels
+    assert "pass" in levels
+
+
+def test_truefalse_is_treated_as_radio():
+    q = make_interaction(question_type="truefalse")
+    data = make_data([acc_slide(slide_id="a1", interactions=[q], texts=["True or false?"])])
+    _, levels = _radio_levels(data)
+    assert "warn" in levels
+
+
+def test_multipleresponse_checkbox_is_exempt():
+    """Checkboxes don't auto-select on arrow, so no Tab instruction is needed."""
+    q = make_interaction(question_type="multipleresponse")
+    data = make_data([acc_slide(slide_id="a1", interactions=[q], texts=["Select all."])])
+    sec, levels = _radio_levels(data)
+    assert "warn" not in levels
+    # No radio questions at all -> the informational "none found" message.
+    assert "info" in levels
+
+
+def test_survey_radio_question_is_exempt():
+    q = make_interaction(question_type="multiplechoice", is_survey=True)
+    data = make_data([acc_slide(slide_id="a1", interactions=[q], texts=["Your opinion?"])])
+    _, levels = _radio_levels(data)
+    assert "warn" not in levels
+
+
+def test_standard_path_radio_question_is_not_checked():
+    """Only the Accessible Path is subject to JAWS checks."""
+    q = make_interaction(question_type="multiplechoice")
+    data = make_data([
+        std_slide(slide_id="s1", interactions=[q], texts=["Pick one."]),
+        acc_slide(slide_id="a1", texts=["Accessible intro."]),
+    ])
+    sec, levels = _radio_levels(data)
+    assert "warn" not in levels
+
+
+def test_radio_check_is_in_the_runner():
+    q = make_interaction(question_type="multiplechoice")
+    data = make_data([
+        std_slide(slide_id="s1"),
+        acc_slide(slide_id="a1", interactions=[q], texts=["Pick one."]),
+    ])
+    titles = [s.title for s in jaws_checks.run_jaws_checks(data)]
+    assert "Radio-Button Tab Instructions (JAWS)" in titles
