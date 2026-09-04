@@ -78,10 +78,11 @@ def observe(args):
     srv = CourseServer(course_dir, companion=companion)
     try:
         with sync_playwright() as p:
-            browser, L = launch(p, srv, headless=False)
-            print(f"\nREADY — drive the course with JAWS in the open window.")
+            browser, L = launch(p, srv, headless=False, no_viewport=True)
+            print(f"\nREADY — drive the course yourself in the open window.")
             print(f"Screen changes are being logged to: {screens_log}")
-            print("Press Ctrl+C here when you're done.\n", flush=True)
+            print("Close the course window (or press Ctrl+C here) when you're done.\n",
+                  flush=True)
             last = object()  # sentinel so the first real screen always logs
             try:
                 while True:

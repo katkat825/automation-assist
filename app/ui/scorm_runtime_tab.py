@@ -149,6 +149,14 @@ class ScormRuntimeTab(QWidget):
         self._headed_chk.setToolTip("Run with a visible browser window instead of headless.")
         og.addWidget(self._headed_chk)
 
+        og.addSpacing(12)
+        self._dual_path_chk = QCheckBox("Dual-path course")
+        self._dual_path_chk.setToolTip(
+            "Treat as a dual-path (accessible) course.\n"
+            "Adds the accessibility checks to the companion panel."
+        )
+        og.addWidget(self._dual_path_chk)
+
         og.addStretch()
         root.addWidget(opt_group)
 
@@ -158,6 +166,16 @@ class ScormRuntimeTab(QWidget):
         self._run_btn.setFixedHeight(30)
         self._run_btn.clicked.connect(self._run)
         action_row.addWidget(self._run_btn)
+
+        self._companion_btn = QPushButton("Open QA Companion")
+        self._companion_btn.setFixedHeight(30)
+        self._companion_btn.setToolTip(
+            "Open the course in a window with the per-screen QA companion panel.\n"
+            "The course is NOT auto-driven — navigate it yourself (e.g. with JAWS).\n"
+            "Close the course window to stop."
+        )
+        self._companion_btn.clicked.connect(self._run_companion)
+        action_row.addWidget(self._companion_btn)
 
         self._open_btn = QPushButton("Open Output Folder")
         self._open_btn.setFixedHeight(30)
@@ -231,9 +249,40 @@ class ScormRuntimeTab(QWidget):
             argv.append("--headed")
 
         self._run_btn.setEnabled(False)
+        self._companion_btn.setEnabled(False)
         self._open_btn.setEnabled(False)
         self._progress.show()
         self._status.setText("Running runtime QA — this can take several minutes…")
+        self._log.clear()
+
+        signals = _RunSignals()
+        signals.line.connect(self._on_line)
+        signals.finished.connect(self._on_finished)
+        signals.error.connect(self._on_error)
+
+        _RunWorker(argv, signals).start()
+
+    def _run_companion(self):
+        """Open the course + per-screen companion panel (no auto-driver)."""
+        if not self._zip_path:
+            QMessageBox.warning(self, "No File", "Please select a SCORM zip file first.")
+            return
+
+        _RUNTIME_OUT_DIR.mkdir(parents=True, exist_ok=True)
+        self._out_dir = str(_RUNTIME_OUT_DIR / Path(self._zip_path).stem)
+
+        argv = [self._zip_path, "--observe", "--data-dir", str(_RUNTIME_OUT_DIR)]
+        if self._dual_path_chk.isChecked():
+            argv.append("--dual-path")
+
+        self._run_btn.setEnabled(False)
+        self._companion_btn.setEnabled(False)
+        self._open_btn.setEnabled(False)
+        self._progress.show()
+        self._status.setText(
+            "Companion open — navigate the course yourself; "
+            "close the course window to stop."
+        )
         self._log.clear()
 
         signals = _RunSignals()
@@ -251,6 +300,7 @@ class ScormRuntimeTab(QWidget):
     def _on_finished(self, rc: int):
         self._progress.hide()
         self._run_btn.setEnabled(True)
+        self._companion_btn.setEnabled(True)
         if self._out_dir and Path(self._out_dir).exists():
             self._open_btn.setEnabled(True)
         self._status.setText(
@@ -260,6 +310,7 @@ class ScormRuntimeTab(QWidget):
     def _on_error(self, msg: str):
         self._progress.hide()
         self._run_btn.setEnabled(True)
+        self._companion_btn.setEnabled(True)
         self._status.setText(f"Error: {msg}")
         QMessageBox.critical(self, "Runtime QA Error", msg)
 

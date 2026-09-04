@@ -65,9 +65,8 @@ _COMPANION_JS = r"""
     var s = DATA.slides[sid];
     if(!s){ head.innerHTML = '<div class="cmp-wait">Waiting for a screen&hellip;</div>'; body.innerHTML=''; return; }
     head.innerHTML =
-      '<div class="cmp-scr">Screen '+esc(s.screen_number||'—')
-        + (s.screen_id ? ' &nbsp; <span class="cmp-sid">'+esc(s.screen_id)+'</span>' : '') + '</div>'
-      + '<div class="cmp-idline">id '+esc(s.slide_id)
+      '<div class="cmp-scr">Screen '+esc(s.screen_number||'—')+'</div>'
+      + '<div class="cmp-idline">'+esc(s.slide_id)
         + (s.path ? ' • '+esc(s.path)+' path' : '')
         + (s.acc_screen_number ? ' • acc '+esc(s.acc_screen_number) : '') + '</div>'
       + '<div class="cmp-title">'+esc(s.slide_title||'')+'</div>';
@@ -189,10 +188,21 @@ class Launched:
             }""")
         return cls
 
-def launch(playwright, server: CourseServer, headless: bool = True, timeout_s: int = 45):
-    """Open the course, dismiss the launch/play gate, wait for slide DOM."""
-    browser = playwright.chromium.launch(headless=headless)
-    page = browser.new_context(viewport={"width": 1280, "height": 800}).new_page()
+def launch(playwright, server: CourseServer, headless: bool = True, timeout_s: int = 45,
+           no_viewport: bool = False):
+    """Open the course, dismiss the launch/play gate, wait for slide DOM.
+
+    no_viewport=True lets the page fill (and resize with) the real browser
+    window instead of a fixed 1280x800 viewport — used by --observe so the
+    course + companion can be maximized to full monitor. The driver keeps the
+    fixed viewport for deterministic clicking."""
+    launch_args = ["--start-maximized"] if no_viewport else []
+    browser = playwright.chromium.launch(headless=headless, args=launch_args)
+    if no_viewport:
+        context = browser.new_context(no_viewport=True)
+    else:
+        context = browser.new_context(viewport={"width": 1280, "height": 800})
+    page = context.new_page()
     page.goto(server.launch_url)
     course = None
     # wait for the course frame and the play gate

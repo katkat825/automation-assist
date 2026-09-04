@@ -4,7 +4,7 @@ build_companion_data assembles the data the live panel renders: each slide keyed
 by its runtime slide_id, with the static-check findings and Q&A for that screen.
 """
 
-from app.automation.scorm.companion import build_companion_data
+from app.automation.scorm.companion import _screen_number_regex, build_companion_data
 from app.automation.scorm.parser import Choice
 from tests.conftest import (
     make_data,
@@ -84,3 +84,24 @@ def test_jaws_finding_buckets_by_slide_label_on_accessible_path():
 def test_empty_course_does_not_crash():
     cd = build_companion_data(make_data([]))
     assert cd["slides"] == {}
+
+
+# --- screen-number matching (bracketed OR bare) ---------------------------
+# Checks aren't consistent: whitespace/dash use "[2.3]", but spelling and a few
+# others write a bare "… — 2.3; 5.1". Both must route to the right screen, and
+# a screen number must not match inside a longer number.
+
+def test_screen_number_regex_matches_bracketed_and_bare():
+    rx = _screen_number_regex(["2.3", "5.1", "10.2"])
+    assert set(rx.findall("warn on [2.3]")) == {"2.3"}
+    assert set(rx.findall('misspelling "x" — 2.3; 5.1')) == {"2.3", "5.1"}
+
+
+def test_screen_number_regex_respects_boundaries():
+    rx = _screen_number_regex(["2.3"])
+    assert rx.findall("value 12.34 here") == []   # not inside a longer number
+    assert rx.findall("path 2.3.4 here") == []    # not a version string
+
+
+def test_screen_number_regex_none_when_no_numbers():
+    assert _screen_number_regex([]) is None
