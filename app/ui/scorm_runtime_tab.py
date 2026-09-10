@@ -157,6 +157,20 @@ class ScormRuntimeTab(QWidget):
         )
         og.addWidget(self._dual_path_chk)
 
+        og.addSpacing(12)
+        self._capture_chk = QCheckBox("Capture screenshots (course print)")
+        self._capture_chk.setToolTip(
+            "Only applies to ‘Open QA Companion’.\n"
+            "While you drive the course, capture each screen's base state once its\n"
+            "on-screen text stops animating in (waits out the timeline), plus any\n"
+            "layer state you snap with the panel's ‘Capture state’ button (or\n"
+            "Ctrl+Shift+S). A screen whose text never settles (looping animation) is\n"
+            "flagged for a manual grab rather than shot mid-animation. Images + a\n"
+            "manifest land in the output folder for the course-print generator.\n"
+            "Off by default — turn on for your final verification pass."
+        )
+        og.addWidget(self._capture_chk)
+
         og.addStretch()
         root.addWidget(opt_group)
 
@@ -274,6 +288,8 @@ class ScormRuntimeTab(QWidget):
         argv = [self._zip_path, "--observe", "--data-dir", str(_RUNTIME_OUT_DIR)]
         if self._dual_path_chk.isChecked():
             argv.append("--dual-path")
+        if self._capture_chk.isChecked():
+            argv.append("--capture-shots")
 
         self._run_btn.setEnabled(False)
         self._companion_btn.setEnabled(False)

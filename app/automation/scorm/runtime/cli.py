@@ -47,6 +47,119 @@ def _prepare_course_dir(args):
     return course_dir, cleanup
 
 
+class _Settle:
+    """Decides when a screen's base state is ready to capture, by watching the
+    on-screen text stop changing (the timeline finishing its text-in animation).
+
+    Bounds:
+      MIN  — ignore the first moment while the slide mounts.
+      HOLD — text must be unchanged this long to count as 'done' (covers fades).
+      MAX  — if it never holds still (looping text/animation), give up on the
+             auto grab and ask for a manual one rather than shoot mid-animation.
+    """
+    MIN = 0.6
+    HOLD = 1.4
+    MAX = 40.0
+
+    def __init__(self):
+        self.sid = None
+        self.done = True
+
+    def reset(self, sid):
+        self.sid = sid
+        self.done = False
+        self.arrived = time.monotonic()
+        self.sig = None
+        self.last_change = self.arrived
+
+    def mark_manual(self):
+        # a manual shot satisfies this screen; stop trying to auto-grab a base
+        self.done = True
+
+    def update(self, cur, sig):
+        if cur != self.sid or self.done:
+            return "wait", (self.sid and "captured" or "capture ready")
+        now = time.monotonic()
+        if sig != self.sig:
+            self.sig = sig
+            self.last_change = now
+        stable = now - self.last_change
+        elapsed = now - self.arrived
+        if elapsed < self.MIN:
+            return "wait", "⏳ screen loading…"
+        if stable >= self.HOLD:
+            self.done = True
+            return "capture", "capturing base…"
+        if elapsed >= self.MAX:
+            self.done = True  # stop auto-attempts; defer to the reviewer
+            return "wait", "✎ won't settle — press Capture when it looks right"
+        return "wait", "⏳ waiting for timeline (text still appearing)…"
+
+
+class _CaptureSession:
+    """Collects course-iframe screenshots during an observe pass and writes a
+    manifest the course-print generator consumes. Best-effort throughout: a
+    failed shot is logged and skipped, never fatal to the QA pass.
+
+    Files:  <shots_dir>/<seq>_<screen>_<slide_id>_<kind>.png
+    Manifest: <shots_dir>/shots_manifest.json  (order == capture order)
+    """
+
+    def __init__(self, args, companion):
+        base = Path(args.shots_dir) if args.shots_dir else (
+            Path(args.data_dir) / Path(args.zip_path).stem / "course_print_shots")
+        base.mkdir(parents=True, exist_ok=True)
+        self.shots_dir = base
+        self.meta = (companion or {}).get("slides", {})
+        self.seq = 0
+        self.per_slide = {}          # slide_id -> count (for the reviewer's log)
+        self.records = []            # manifest rows, in capture order
+
+    def capture(self, L, slide_id, kind="base"):
+        self.seq += 1
+        info = self.meta.get(slide_id, {})
+        screen = info.get("screen_number", "") or "unknown"
+        safe_screen = str(screen).replace(".", "-")
+        fname = f"{self.seq:03d}_s{safe_screen}_{slide_id}_{kind}.png"
+        path = self.shots_dir / fname
+        ok = L.capture_course(str(path))
+        if not ok:
+            print(f"  capture: FAILED for screen {screen} ({slide_id})", flush=True)
+            self.seq -= 1
+            return
+        self.per_slide[slide_id] = self.per_slide.get(slide_id, 0) + 1
+        self.records.append({
+            "seq": self.seq,
+            "file": fname,
+            "slide_id": slide_id,
+            "screen_number": screen,
+            "slide_title": info.get("slide_title", ""),
+            "kind": kind,
+            "ts": datetime.now().isoformat(timespec="seconds"),
+        })
+        if kind == "base":
+            tag = "base"
+        else:
+            n_manual = sum(1 for r in self.records
+                           if r["slide_id"] == slide_id and r["kind"] == "manual")
+            tag = f"layer #{n_manual}"
+        print(f"  📸 screen {screen} [{tag}] -> {fname}", flush=True)
+
+    def finish(self):
+        manifest = {
+            "shots_dir": str(self.shots_dir),
+            "count": len(self.records),
+            "slides_captured": len(self.per_slide),
+            "shots": self.records,
+        }
+        (self.shots_dir / "shots_manifest.json").write_text(
+            json.dumps(manifest, indent=1))
+        print(f"\ncapture: wrote {len(self.records)} screenshot(s) across "
+              f"{len(self.per_slide)} screen(s)\n"
+              f"capture: manifest -> {self.shots_dir / 'shots_manifest.json'}",
+              flush=True)
+
+
 def observe(args):
     """Passive mode: host the course in a headed browser and get out of the way
     so a human can drive it with a screen reader. Runs NO driver. While idle,
@@ -75,7 +188,14 @@ def observe(args):
     except Exception as e:  # noqa: BLE001 — panel is a convenience, never block QA
         print(f"companion: disabled ({e!r})", flush=True)
 
-    srv = CourseServer(course_dir, companion=companion)
+    # --- optional screenshot capture for course-print generation -------------
+    cap = _CaptureSession(args, companion) if args.capture_shots else None
+    if cap:
+        print(f"capture: ON — screenshots -> {cap.shots_dir}", flush=True)
+        print("capture: base state grabbed on each new screen; press the panel's "
+              "‘Capture state’ button (or Ctrl+Shift+S) for each layer.", flush=True)
+
+    srv = CourseServer(course_dir, companion=companion, capture=bool(cap))
     try:
         with sync_playwright() as p:
             browser, L = launch(p, srv, headless=False, no_viewport=True)
@@ -84,6 +204,7 @@ def observe(args):
             print("Close the course window (or press Ctrl+C here) when you're done.\n",
                   flush=True)
             last = object()  # sentinel so the first real screen always logs
+            settle = _Settle()  # per-screen text-stability tracker for base capture
             try:
                 while True:
                     try:
@@ -99,10 +220,29 @@ def observe(args):
                         with screens_log.open("a", encoding="utf-8") as fh:
                             fh.write(line + "\n")
                         print("  " + line, flush=True)
+                        if cap:
+                            settle.reset(cur)
+
+                    if cap:
+                        # base capture: fire once the on-screen TEXT has stopped
+                        # changing (timeline done). Never grabs a mid-animation
+                        # frame — a screen that won't settle is flagged for a
+                        # manual grab instead. Manual captures are immediate.
+                        decision, status = settle.update(cur, L.active_slide_text())
+                        L.set_capture_status(status)
+                        if decision == "capture":
+                            cap.capture(L, cur, kind="base")
+                            L.set_capture_status(f"✓ base captured — screen {cur[:10]}…")
+                        for _req in L.drain_capture_queue():
+                            cap.capture(L, cur, kind="manual")
+                            settle.mark_manual()
+                            L.set_capture_status("✓ captured (manual)")
                     time.sleep(0.25)
             except KeyboardInterrupt:
                 print("\nstopping observe ...", flush=True)
             finally:
+                if cap:
+                    cap.finish()
                 try:
                     browser.close()
                 except Exception:
@@ -136,6 +276,13 @@ def main(argv=None):
                          "checks to the companion panel)")
     ap.add_argument("--non-english", action="store_true",
                     help="observe: course is not in English (skips spell/terminology)")
+    ap.add_argument("--capture-shots", action="store_true",
+                    help="observe: capture course screenshots for the course print — "
+                         "base state auto-grabbed per screen, plus the panel's "
+                         "‘Capture state’ button for layer states. Off by default.")
+    ap.add_argument("--shots-dir", default=None,
+                    help="where --capture-shots writes images + shots_manifest.json "
+                         "(default: <data-dir>/<course>/course_print_shots)")
     args = ap.parse_args(argv)
 
     if args.observe:

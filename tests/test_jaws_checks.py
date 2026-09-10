@@ -46,6 +46,31 @@ def test_single_path_course_has_no_accessible_scenes():
     assert jaws_checks.get_accessible_path_scene_ids(data) == set()
 
 
+def test_scene_titled_accessible_dash_module_is_detected():
+    """Courses authored as standard-path-then-accessible-path often name the
+    accessible scenes "Accessible - <module>" rather than "Accessible Path".
+    These scenes are ALSO menu-bearing, so the parallel-structure rule can't
+    catch them — the "begins with Accessible" naming rule must. (Mirrors the
+    real 11570A OWASP course.)"""
+    data = make_data([
+        std_slide(slide_id="s1", scene_id="std", scene_title="A01"),
+        make_slide(slide_id="a1", scene_id="acc",
+                   scene_title="Accessible - A01", is_in_menu=True),
+    ])
+    assert "acc" in jaws_checks.get_accessible_path_scene_ids(data)
+
+
+def test_accessibility_content_module_is_not_a_false_positive():
+    """A standard content module *about* accessibility (title begins with
+    "Accessibility", not the word "Accessible") must not be mistaken for the
+    accessible path."""
+    data = make_data([
+        std_slide(slide_id="s1", scene_id="std", scene_title="Intro"),
+        std_slide(slide_id="s2", scene_id="a11y", scene_title="Accessibility Basics"),
+    ])
+    assert "a11y" not in jaws_checks.get_accessible_path_scene_ids(data)
+
+
 # --- parallel-structure rule ---------------------------------------------
 
 def test_untitled_scene_mirroring_menu_titles_is_detected():

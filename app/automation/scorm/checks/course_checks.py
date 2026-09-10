@@ -5,6 +5,7 @@ Each function reads a different part of ScormData and returns one Section.
 They share no state beyond Section itself.
 """
 
+import html
 import re
 from typing import Optional
 
@@ -196,7 +197,10 @@ def check_menu(data: ScormData) -> Section:
             child_links = link.get("links", [])
 
             if slide_title and display:
-                if display != slide_title:
+                # Storyline stores menu labels with raw HTML entities
+                # (e.g. "&amp;") while slide titles are already decoded,
+                # so unescape both before comparing to avoid false positives.
+                if html.unescape(display) != html.unescape(slide_title):
                     sec.add(
                         "warn",
                         f'Menu label ≠ slide title: menu="{display}" | slide="{slide_title}"',

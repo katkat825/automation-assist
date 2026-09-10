@@ -7,6 +7,7 @@ hard failure that stops QA, so the pass/fail levels it emits are load-bearing.
 from app.automation.scorm.checks.course_checks import (
     check_course_overview,
     check_course_paths,
+    check_menu,
     check_questions,
     check_scorm_api,
     check_video_speed,
@@ -231,3 +232,29 @@ def test_video_speed_reports_enabled_from_story():
 def test_video_speed_without_story_still_returns_a_section():
     sec = check_video_speed(make_data([]), None)
     assert sec.title
+
+
+# --- menu label vs slide title -------------------------------------------
+
+def _menu_link(displaytext, slidetitle):
+    return {"displaytext": displaytext, "slidetitle": slidetitle, "links": []}
+
+
+def test_menu_ampersand_entity_is_not_a_false_positive():
+    """Storyline stores menu labels with raw entities (&amp;) but slide
+    titles decoded (&); they should be treated as matching."""
+    data = make_data([], nav_outline=[
+        _menu_link("A09: Logging &amp; Alerting - Defined",
+                   "A09: Logging & Alerting - Defined"),
+    ])
+    sec = check_menu(data)
+    assert "warn" not in levels(sec)
+    assert "All menu labels match" in text_of(sec)
+
+
+def test_menu_genuine_mismatch_still_warns():
+    data = make_data([], nav_outline=[
+        _menu_link("Intro to Phishing", "Phishing Basics"),
+    ])
+    sec = check_menu(data)
+    assert "warn" in levels(sec)

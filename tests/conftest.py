@@ -36,6 +36,9 @@ def make_slide(
     is_in_menu=True,
     duration_ms=0.0,
     layers=None,
+    prev_nav_kind="",
+    prev_nav_target="",
+    history_prev_buttons=0,
 ) -> SlideInfo:
     return SlideInfo(
         scene_number=scene_number,
@@ -52,6 +55,9 @@ def make_slide(
         is_in_menu=is_in_menu,
         duration_ms=duration_ms,
         layers=list(layers or []),
+        prev_nav_kind=prev_nav_kind,
+        prev_nav_target=prev_nav_target,
+        history_prev_buttons=history_prev_buttons,
     )
 
 

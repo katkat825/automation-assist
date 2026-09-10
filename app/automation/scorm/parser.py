@@ -136,6 +136,9 @@ class SlideInfo:
     is_in_menu: bool = False
     duration_ms: float = 0.0    # max timeline duration across layers (ms)
     layers: list = field(default_factory=list)    # list of LayerInfo (acc data)
+    prev_nav_kind: str = ""       # '' | none | gotoplay | history_prev | conditional | unresolved
+    prev_nav_target: str = ""     # target slide_id when prev_nav_kind == 'gotoplay'
+    history_prev_buttons: int = 0 # base-layer custom Back buttons using history_prev
 
 
 @dataclass
@@ -405,6 +408,112 @@ def _collect_menu_slide_ids(links: list, ids: set):
 
 
 # ---------------------------------------------------------------------------
+# Previous-button navigation extraction
+# ---------------------------------------------------------------------------
+
+_PREV_BUTTON_GROUP = "ActGrpOnPrevButtonClick"
+_CLICK_EVENTS = ("onrelease", "onclick", "onpress", "ontouchend")
+
+
+def _collect_nav_actions(node) -> list:
+    """Collect ('gotoplay', last_segment, in_conditional) and
+    ('history_prev', '', in_conditional) tuples from an action subtree."""
+    out = []
+
+    def walk(o, in_cond):
+        if isinstance(o, dict):
+            k = o.get("kind")
+            if k == "gotoplay":
+                val = o.get("objRef", {}).get("value", "") or ""
+                out.append(("gotoplay", val.split(".")[-1], in_cond))
+            elif k == "history_prev":
+                out.append(("history_prev", "", in_cond))
+            cond = in_cond or k == "if_action"
+            for v in o.values():
+                walk(v, cond)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v, in_cond)
+
+    walk(node, False)
+    return out
+
+
+def _extract_prev_nav(slide_data: dict, valid_slide_ids: set):
+    """Resolve the player Previous button target for one slide.
+
+    Returns (kind, target):
+      'none'         no ActGrpOnPrevButtonClick (default runtime prev),
+      'gotoplay'     single fixed target -> target is a slide id,
+      'history_prev' returns to the last-viewed slide,
+      'conditional'  branching / multiple / unresolvable target,
+      'unresolved'   group present but no readable navigation action.
+    """
+    groups = slide_data.get("actionGroups", {})
+    if not isinstance(groups, dict) or _PREV_BUTTON_GROUP not in groups:
+        return ("none", "")
+    grp = groups.get(_PREV_BUTTON_GROUP) or {}
+    actions = grp.get("actions", grp)
+    navs = _collect_nav_actions(actions)
+    if not navs:
+        return ("unresolved", "")
+    if any(n[0] == "history_prev" for n in navs):
+        return ("history_prev", "")
+    targets = {n[1] for n in navs if n[0] == "gotoplay"}
+    branched = any(n[2] for n in navs)
+    if branched or len(targets) != 1:
+        return ("conditional", "")
+    target = next(iter(targets))
+    if target not in valid_slide_ids:
+        # a scene-level entry or an unknown id — cannot compare statically
+        return ("conditional", target)
+    return ("gotoplay", target)
+
+
+def _event_has_history_prev(node) -> bool:
+    if isinstance(node, dict):
+        if node.get("kind") == "history_prev":
+            return True
+        return any(_event_has_history_prev(v) for v in node.values())
+    if isinstance(node, list):
+        return any(_event_has_history_prev(v) for v in node)
+    return False
+
+
+def _count_base_history_prev_buttons(slide_data: dict) -> int:
+    """Count base-layer objects whose click event fires history_prev
+    (custom Back buttons using last-viewed navigation)."""
+    count = 0
+
+    def walk_obj(o):
+        nonlocal count
+        if isinstance(o, dict):
+            if o.get("kind") in ("vectorshape", "image", "group") and isinstance(
+                o.get("events"), list
+            ):
+                for ev in o["events"]:
+                    if (
+                        isinstance(ev, dict)
+                        and ev.get("kind") in _CLICK_EVENTS
+                        and _event_has_history_prev(ev)
+                    ):
+                        count += 1
+                        break
+            for v in o.values():
+                walk_obj(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk_obj(v)
+
+    for layer in slide_data.get("slideLayers", []):
+        if not layer.get("isBaseLayer", False):
+            continue
+        for obj in layer.get("objects", []):
+            walk_obj(obj)
+    return count
+
+
+# ---------------------------------------------------------------------------
 # Main parsers
 # ---------------------------------------------------------------------------
 
@@ -535,6 +644,9 @@ def parse_scorm_zip(zip_path: str) -> ScormData:
                             slide.external_links = _extract_external_links_from_slide_data(sd)
                             slide.duration_ms = _extract_duration_from_slide_data(sd)
                             slide.layers = _extract_layers_from_slide_data(sd)
+                            _valid_ids = set(slide_by_id.keys())
+                            slide.prev_nav_kind, slide.prev_nav_target = _extract_prev_nav(sd, _valid_ids)
+                            slide.history_prev_buttons = _count_base_history_prev_buttons(sd)
                     except Exception as e:
                         errors.append(f"{slide.html5url}: {e}")
 

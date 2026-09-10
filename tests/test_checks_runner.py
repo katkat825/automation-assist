@@ -132,19 +132,40 @@ def test_accessibility_checks_do_not_run_unless_asked():
     assert titles.isdisjoint(JAWS_SECTIONS)
 
 
-def test_dual_path_without_an_accessible_path_warns_instead_of_silently_skipping():
-    """Ticking the box on a single-path course is probably a mistake.
+def test_dual_path_without_an_accessible_path_fails_as_a_probable_defect():
+    """Dual-path is a deliberate selection, not an accidental tick.
 
-    Rather than quietly running no accessibility checks, the runner emits a
-    section explaining that nothing ran and what to do about it.
+    So if it's set but no Accessible Path can be found, the likeliest cause
+    is a defect in the course (missing or unrecognizable accessible path).
+    The runner surfaces that as a failure worth investigating rather than a
+    soft, self-blaming skip.
     """
     data = make_data([make_slide(is_in_menu=True)])
     report = run_all_checks(data, None, dual_path=True)
 
     jaws = [s for s in report.sections if s.title == "JAWS / Screen Reader Checks"]
     assert len(jaws) == 1
-    assert [i.level for i in jaws[0].items] == ["warn"]
-    assert "no scene titled 'Accessible Path'" in jaws[0].items[0].message
+    assert [i.level for i in jaws[0].items] == ["fail"]
+    msg = jaws[0].items[0].message
+    assert "no Accessible Path was detected" in msg
+    assert "likely a course defect" in msg
+
+
+def test_dual_path_without_an_accessible_path_still_runs_the_jaws_checks():
+    """A detection miss must NOT silently skip the accessibility checks.
+
+    Even when no Accessible Path is detected, the JAWS / screen-reader checks
+    still run (against the whole course as a fallback) alongside the defect
+    flag — because failing to isolate the accessible path is exactly when
+    silently skipping the checks would be most dangerous.
+    """
+    data = make_data([make_slide(is_in_menu=True)])
+    titles = set(section_titles(run_all_checks(data, None, dual_path=True)))
+
+    # the probable-defect flag is present ...
+    assert "JAWS / Screen Reader Checks" in titles
+    # ... AND the real accessibility checks ran anyway
+    assert JAWS_SECTIONS.issubset(titles)
 
 
 def test_single_path_course_gets_no_jaws_section_by_default():

@@ -108,6 +108,14 @@ _ACRONYM_ALWAYS_FLAG: set[str] = {
 # A scene whose title matches this is treated as the Accessible Path.
 _ACC_PATH_SCENE_RE = re.compile(r"accessible\s*path", re.IGNORECASE)
 
+# Fallback naming signal: a scene whose title *begins with* the word
+# "Accessible" (e.g. "Accessible - A01", "Accessible A02"). Courses built as a
+# standard path followed by an accessible path often name the accessible
+# scenes this way rather than the literal "Accessible Path". Anchored at the
+# start and word-bounded, so it matches "Accessible - ..." but NOT
+# "Accessibility ..." (a content module about accessibility).
+_ACC_PATH_TITLE_PREFIX_RE = re.compile(r"^\s*accessible\b", re.IGNORECASE)
+
 # Back-end slide titles that contain these characters are flagged as
 # "internal naming" — JAWS reads them literally and they sound bad.
 _INTERNAL_TITLE_RE = re.compile(r"[_]")
@@ -130,8 +138,10 @@ def get_accessible_path_scene_ids(data: ScormData) -> set:
     Detect every scene_id that belongs to the Accessible Path of a dual-path
     course.  Two complementary signals:
 
-      (a) Explicit naming — the scene title contains "Accessible Path".
-          Seen on courses that label the alternate path directly.
+      (a) Explicit naming — the scene title contains "Accessible Path", OR
+          begins with the word "Accessible" (e.g. "Accessible - A01"). Seen
+          on courses that label the alternate path directly, whether with the
+          full phrase or an "Accessible - <module>" prefix per module.
       (b) Parallel structure — the scene has zero menu slides, contains at
           least 2 slides, and at least 2 of its slide titles also appear in
           a menu-bearing scene.  Seen on courses where the accessible-path
@@ -149,8 +159,16 @@ def get_accessible_path_scene_ids(data: ScormData) -> set:
     acc_ids: set = set()
 
     # --- Rule (a): explicit scene title ---
+    # (a1) the title contains "Accessible Path"; or
+    # (a2) the title begins with the word "Accessible" (e.g. "Accessible - A01"),
+    #      the common naming for the accessible half of a course authored as a
+    #      standard path followed by an accessible path.
     for sid, slides in by_scene.items():
-        if any(_ACC_PATH_SCENE_RE.search(s.scene_title or "") for s in slides):
+        if any(
+            _ACC_PATH_SCENE_RE.search(s.scene_title or "")
+            or _ACC_PATH_TITLE_PREFIX_RE.search(s.scene_title or "")
+            for s in slides
+        ):
             acc_ids.add(sid)
 
     # --- Rule (b): parallel structure ---
@@ -413,7 +431,7 @@ def _detect_on_screen_title(slide: SlideInfo) -> Optional[str]:
 _ACRONYM_RE = re.compile(r"\b[A-Z]{2,}\b")
 
 
-def check_acronym_spacing(data: ScormData) -> "Section":
+def check_acronym_spacing(data: ScormData, slides=None, scope_label="the Accessible Path") -> "Section":
     sec = Section("Acronym Letter-Spacing (JAWS)")
 
     checker = _get_spell_checker()
@@ -427,7 +445,7 @@ def check_acronym_spacing(data: ScormData) -> "Section":
     # Aggregate hits per acronym so we report each one once with locations.
     hits: dict[str, list[str]] = {}
 
-    for slide in get_accessible_path_slides(data):
+    for slide in (slides if slides is not None else get_accessible_path_slides(data)):
         loc = _slide_label(slide)
         seen_for_slide: set[str] = set()
         for text in slide.texts:
@@ -450,7 +468,7 @@ def check_acronym_spacing(data: ScormData) -> "Section":
                 hits.setdefault(word, []).append(loc)
 
     if not hits:
-        sec.add("pass", "No unspaced acronyms detected in the Accessible Path")
+        sec.add("pass", f"No unspaced acronyms detected in {scope_label}")
         return sec
 
     for word in sorted(hits.keys()):
@@ -470,7 +488,7 @@ def check_acronym_spacing(data: ScormData) -> "Section":
 # 4. Back-end slide title checks
 # ---------------------------------------------------------------------------
 
-def check_slide_titles(data: ScormData) -> "Section":
+def check_slide_titles(data: ScormData, slides=None, scope_label="the Accessible Path") -> "Section":
     sec = Section("Slide Titles (back-end vs on-screen)")
 
     internal_count = 0
@@ -478,7 +496,7 @@ def check_slide_titles(data: ScormData) -> "Section":
     no_title_count = 0
     checked = 0
 
-    for slide in get_accessible_path_slides(data):
+    for slide in (slides if slides is not None else get_accessible_path_slides(data)):
         checked += 1
         backend = (slide.slide_title or "").strip()
         loc = _slide_label(slide)
@@ -521,7 +539,7 @@ def check_slide_titles(data: ScormData) -> "Section":
             )
 
     if checked == 0:
-        sec.add("info", "No Accessible Path slides found — title check skipped")
+        sec.add("info", f"No slides found to check in {scope_label} — title check skipped")
         return sec
 
     if internal_count == 0:
@@ -541,12 +559,12 @@ def check_slide_titles(data: ScormData) -> "Section":
 # 5. Keyboard / tab-order checks
 # ---------------------------------------------------------------------------
 
-def check_keyboard_navigation(data: ScormData) -> "Section":
+def check_keyboard_navigation(data: ScormData, slides=None, scope_label="the Accessible Path") -> "Section":
     sec = Section("Keyboard Navigation & Tab Order")
 
     issues_found = False
 
-    for slide in get_accessible_path_slides(data):
+    for slide in (slides if slides is not None else get_accessible_path_slides(data)):
         loc = _slide_label(slide)
 
         for layer in slide.layers:
@@ -617,7 +635,7 @@ def check_keyboard_navigation(data: ScormData) -> "Section":
                     )
 
     if not issues_found:
-        sec.add("pass", "No keyboard / tab-order issues detected in the Accessible Path")
+        sec.add("pass", f"No keyboard / tab-order issues detected in {scope_label}")
     return sec
 
 
@@ -625,12 +643,12 @@ def check_keyboard_navigation(data: ScormData) -> "Section":
 # 6. Modal / dialog labelling
 # ---------------------------------------------------------------------------
 
-def check_dialog_labels(data: ScormData) -> "Section":
+def check_dialog_labels(data: ScormData, slides=None, scope_label="the Accessible Path") -> "Section":
     sec = Section("Modal / Dialog Labels")
 
     flagged = 0
     total_dialogs = 0
-    for slide in get_accessible_path_slides(data):
+    for slide in (slides if slides is not None else get_accessible_path_slides(data)):
         loc = _slide_label(slide)
 
         for layer in slide.layers:
@@ -646,7 +664,7 @@ def check_dialog_labels(data: ScormData) -> "Section":
                 )
 
     if total_dialogs == 0:
-        sec.add("info", "No dialog/modal layers found in the Accessible Path")
+        sec.add("info", f"No dialog/modal layers found in {scope_label}")
     elif flagged == 0:
         sec.add("pass", f"All {total_dialogs} dialog layer(s) have an accessible label")
     return sec
@@ -667,12 +685,12 @@ _READING_ORDER_X_TOLERANCE = 20   # px — ignore tiny x jitter
 _READING_ORDER_PER_LAYER_LIMIT = 3  # max issues to print per layer (rest summarised)
 
 
-def check_reading_order(data: ScormData) -> "Section":
+def check_reading_order(data: ScormData, slides=None, scope_label="the Accessible Path") -> "Section":
     sec = Section("Reading Order vs Visual Order")
 
     issues_found = False
 
-    for slide in get_accessible_path_slides(data):
+    for slide in (slides if slides is not None else get_accessible_path_slides(data)):
         loc = _slide_label(slide)
 
         for layer in slide.layers:
@@ -714,7 +732,7 @@ def check_reading_order(data: ScormData) -> "Section":
                     )
 
     if not issues_found:
-        sec.add("pass", "Tab order matches visual order on all Accessible Path layers")
+        sec.add("pass", f"Tab order matches visual order on all checked layers in {scope_label}")
     return sec
 
 
@@ -747,13 +765,13 @@ def _is_radio_question(ia) -> bool:
     return (not ia.is_survey) and (ia.question_type in _RADIO_QUESTION_TYPES)
 
 
-def check_radio_tab_instructions(data: ScormData) -> "Section":
+def check_radio_tab_instructions(data: ScormData, slides=None, scope_label="the Accessible Path") -> "Section":
     sec = Section("Radio-Button Tab Instructions (JAWS)")
 
     checked = 0
     flagged = 0
 
-    for slide in get_accessible_path_slides(data):
+    for slide in (slides if slides is not None else get_accessible_path_slides(data)):
         radio_qs = [ia for ia in slide.interactions if _is_radio_question(ia)]
         if not radio_qs:
             continue
@@ -776,7 +794,7 @@ def check_radio_tab_instructions(data: ScormData) -> "Section":
             )
 
     if checked == 0:
-        sec.add("info", "No radio-button questions found in the Accessible Path")
+        sec.add("info", f"No radio-button questions found in {scope_label}")
     elif flagged == 0:
         sec.add(
             "pass",
@@ -805,21 +823,23 @@ def _strip_for_match(s: str) -> str:
 # Master JAWS runner
 # ---------------------------------------------------------------------------
 
-def run_jaws_checks(data: ScormData) -> list:
+def run_jaws_checks(data: ScormData, slides=None, scope_label="the Accessible Path") -> list:
     """
-    Run every JAWS / screen-reader static check on the Accessible Path slides
-    of the given course.  Returns a list of Sections in display order.
+    Run every JAWS / screen-reader static check and return the Sections in
+    display order.
 
-    The caller (checks.run_all_checks) is responsible for deciding whether to
-    invoke this — it should only do so when the user has marked the course
-    as dual-path AND an Accessible Path scene actually exists.
+    By default the checks inspect the Accessible Path slides (slides=None).
+    The caller may pass an explicit `slides` list plus a `scope_label` to run
+    the same checks against a different slide set — e.g. the whole course as a
+    fallback when a dual-path course is flagged but no Accessible Path could be
+    detected, so the checks still run instead of being silently skipped.
     """
     return [
-        check_acronym_spacing(data),
-        check_slide_titles(data),
-        check_keyboard_navigation(data),
-        check_reading_order(data),
-        check_radio_tab_instructions(data),
+        check_acronym_spacing(data, slides=slides, scope_label=scope_label),
+        check_slide_titles(data, slides=slides, scope_label=scope_label),
+        check_keyboard_navigation(data, slides=slides, scope_label=scope_label),
+        check_reading_order(data, slides=slides, scope_label=scope_label),
+        check_radio_tab_instructions(data, slides=slides, scope_label=scope_label),
         # check_dialog_labels(data),
         # ^ Disabled by team practice: JAWS announcing "modal dialog" without a
         # name is currently acceptable. Re-enable if that policy changes.

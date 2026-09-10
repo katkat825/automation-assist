@@ -31,6 +31,7 @@ from .course_checks import (
     check_video_speed,
 )
 from .text_checks import check_duplicates, check_whitespace_and_spelling
+from .navigation_checks import check_prev_navigation
 from .language_checks import check_terminology, check_untranslated_english
 from .reports import global_search, build_screen_table, build_manual_checklist
 from .runner import run_all_checks
@@ -40,6 +41,7 @@ __all__ = [
     "check_course_overview", "check_course_paths", "check_scorm_api",
     "check_scoring", "check_menu", "check_questions", "check_video_speed",
     "check_duplicates", "check_whitespace_and_spelling",
+    "check_prev_navigation",
     "check_terminology", "check_untranslated_english",
     "global_search", "build_screen_table", "build_manual_checklist",
     "run_all_checks",

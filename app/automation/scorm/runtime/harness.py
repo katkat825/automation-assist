@@ -99,12 +99,61 @@ _COMPANION_JS = r"""
 """
 
 
-def _build_launcher_html(seed_js: str, companion: dict | None) -> str:
+# --- opt-in screenshot capture (course print) --------------------------------
+# A floating button + a queue the observe loop drains. Deliberately layered on
+# top of the existing DOM (position:fixed) so it never disturbs the companion
+# panel. Auto per-screen capture is driven from Python; this button lets the
+# reviewer also grab each interactive layer state they open during QA.
+
+_CAPTURE_UI = r"""
+<div id="cap-ui" style="position:fixed;right:16px;bottom:16px;z-index:2147483647;
+ font:13px system-ui,Segoe UI,Arial,sans-serif;text-align:right">
+  <div id="cap-flash" style="display:none;margin-bottom:6px;background:#1e8449;color:#fff;
+   padding:4px 9px;border-radius:4px;box-shadow:0 1px 4px rgba(0,0,0,.3)"></div>
+  <div id="cap-state" style="margin-bottom:6px;background:#26303b;color:#e6ecf1;
+   padding:4px 9px;border-radius:4px;box-shadow:0 1px 4px rgba(0,0,0,.3);min-width:150px">
+   capture ready</div>
+  <button id="cap-btn" style="background:#c0392b;color:#fff;border:0;border-radius:6px;
+   padding:9px 14px;font-weight:700;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.35)">
+   &#128247; Capture state</button>
+</div>
+<script>
+(function(){
+  window.__captureQueue = window.__captureQueue || [];
+  window.__captureCount = 0;
+  var btn = document.getElementById('cap-btn');
+  var flash = document.getElementById('cap-flash');
+  var state = document.getElementById('cap-state');
+  window.__capture = function(){
+    window.__captureQueue.push({t: Date.now(), kind: 'manual'});
+    window.__captureCount++;
+    flash.textContent = 'Queued — ' + window.__captureCount + ' captured';
+    flash.style.display = 'block';
+    clearTimeout(window.__capFlashT);
+    window.__capFlashT = setTimeout(function(){ flash.style.display='none'; }, 1400);
+  };
+  btn.addEventListener('click', window.__capture);
+  // keyboard shortcut: Ctrl+Shift+S (avoids the browser's own save dialog focus)
+  window.addEventListener('keydown', function(e){
+    if(e.ctrlKey && e.shiftKey && (e.key==='S'||e.key==='s')){ e.preventDefault(); window.__capture(); }
+  });
+  // reflect the Python-side capture status (waiting / captured / manual-needed)
+  setInterval(function(){
+    if(typeof window.__capStatus === 'string') state.textContent = window.__capStatus;
+  }, 250);
+})();
+</script>
+"""
+
+
+def _build_launcher_html(seed_js: str, companion: dict | None, capture: bool = False) -> str:
     head = "<!doctype html><html><head><script>" + seed_js + STUB_JS + "</script>"
+    cap_ui = _CAPTURE_UI if capture else ""
     if companion is None:
         return (head + "</head><body style='margin:0'>"
                 "<iframe id='course' src='/index_lms.html' "
-                "style='border:0;width:100vw;height:100vh'></iframe></body></html>")
+                "style='border:0;width:100vw;height:100vh'></iframe>"
+                + cap_ui + "</body></html>")
     # embed the companion data safely (avoid closing the script tag early)
     data_js = json.dumps(companion).replace("</", "<\\/")
     return (
@@ -116,6 +165,7 @@ def _build_launcher_html(seed_js: str, companion: dict | None) -> str:
         "</div>"
         "<script>window.__companion=" + data_js + ";</script>"
         "<script>" + _COMPANION_JS + "</script>"
+        + cap_ui +
         "</body></html>"
     )
 
@@ -139,10 +189,10 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
 
 class CourseServer:
     def __init__(self, course_dir: str, port: int = 0, seed: dict | None = None,
-                 companion: dict | None = None):
+                 companion: dict | None = None, capture: bool = False):
         seed_js = f"window.__scormSeed = {json.dumps(seed or {})};"
         handler = type("H", (_Handler,), {
-            "launcher_html": _build_launcher_html(seed_js, companion)
+            "launcher_html": _build_launcher_html(seed_js, companion, capture)
         })
         http.server.ThreadingHTTPServer.allow_reuse_address = True
         self.srv = http.server.ThreadingHTTPServer(
@@ -169,6 +219,54 @@ class Launched:
 
     def cmi(self) -> dict:
         return self.page.evaluate("window.__cmi")
+
+    def capture_course(self, path: str) -> bool:
+        """Screenshot just the course iframe (excludes the companion panel).
+        Returns True on success. Never raises — capture is best-effort and must
+        not interrupt a manual QA pass."""
+        try:
+            self.page.locator("#course").screenshot(path=path)
+            return True
+        except Exception:
+            return False
+
+    def drain_capture_queue(self) -> list:
+        """Return and clear any manual-capture requests queued by the panel
+        button. Empty list if capture UI isn't present."""
+        try:
+            return self.page.evaluate(
+                "() => (window.__captureQueue ? window.__captureQueue.splice(0) : [])")
+        except Exception:
+            return []
+
+    def active_slide_text(self) -> str | None:
+        """Normalized visible text of the ACTIVE slide. Used as a stability
+        signal: on a timeline, text fades in synced to the voiceover, so this
+        string grows until the timeline finishes, then holds steady. Looping
+        audio and looping background animation don't change it (only the text
+        does), so it's a reliable 'is the text done appearing?' signal.
+        Returns None if no slide is mounted."""
+        try:
+            return self.frame.evaluate(
+                """() => {
+                  const vis = Array.from(document.querySelectorAll('.slide[class*="cs-"]'))
+                    .filter(s => {
+                      const cs = getComputedStyle(s), r = s.getBoundingClientRect();
+                      return cs.display !== 'none' && cs.visibility !== 'hidden' && r.width > 0;
+                    });
+                  if (!vis.length) return null;
+                  const t = vis[vis.length - 1].innerText || '';
+                  return t.replace(/\s+/g, ' ').trim();
+                }""")
+        except Exception:
+            return None
+
+    def set_capture_status(self, text: str) -> None:
+        """Push a short status string into the panel's capture readout."""
+        try:
+            self.page.evaluate("(s) => { window.__capStatus = s; }", text)
+        except Exception:
+            pass
 
     def current_slide_id(self) -> str | None:
         """Progress signal: slide id from the DOM (`.slide.cs-<id>` class).
