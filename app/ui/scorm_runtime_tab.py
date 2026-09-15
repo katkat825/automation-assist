@@ -11,19 +11,22 @@ same entry point used from the command line:
 
     python -m app.automation.scorm.runtime.cli <course.zip> [--data-dir DIR] ...
 
-Here we call ``cli.main(argv)`` on a worker thread and stream its printed
-progress into the log pane, so the whole pipeline (build model -> plan ->
-drive -> verify -> report) runs without blocking the UI.
+Here we call ``cli.main(argv, cancel=...)`` on a worker thread and stream its
+printed progress into the log pane, so the whole pipeline (build model -> plan
+-> drive -> verify -> report) runs without blocking the UI. A cancel event
+lets the reviewer stop a run that is taking too long — the slow pre-browser
+stages (unzip / media transcode / launch) poll it and bail out cleanly, so the
+tab never sits "loading" with no way out.
 """
 
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, QObject
+from PySide6.QtCore import Qt, Signal, QObject, QTimer, QUrl
 from PySide6.QtGui import QFont, QDesktopServices
-from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFileDialog, QGroupBox, QComboBox, QCheckBox, QTextEdit,
@@ -38,6 +41,9 @@ _MONO = QFont("Courier New")
 
 # Runtime outputs land under this directory: DATA_DIR/runtime_qa/<course>/
 _RUNTIME_OUT_DIR = DATA_DIR / "runtime_qa"
+
+# Return code the CLI uses when a run was cancelled by the reviewer.
+_RC_CANCELLED = 130
 
 
 class _RunSignals(QObject):
@@ -66,17 +72,18 @@ class _StreamToSignal:
 
 
 class _RunWorker(threading.Thread):
-    def __init__(self, argv, signals):
+    def __init__(self, argv, signals, cancel):
         super().__init__(daemon=True)
         self._argv = argv
         self._signals = signals
+        self._cancel = cancel
 
     def run(self):
         stream = _StreamToSignal(self._signals.line)
         old_out, old_err = sys.stdout, sys.stderr
         sys.stdout = sys.stderr = stream
         try:
-            rc = runtime_cli.main(self._argv)
+            rc = runtime_cli.main(self._argv, cancel=self._cancel)
             stream.flush()
             self._signals.finished.emit(int(rc or 0))
         except SystemExit as e:  # argparse errors
@@ -94,6 +101,13 @@ class ScormRuntimeTab(QWidget):
         super().__init__(parent)
         self._zip_path = ""
         self._out_dir = ""
+        self._cancel = None          # threading.Event for the active run
+        self._mode = ""              # "run" | "companion" (for status text)
+        self._run_start = 0.0        # monotonic start time of the active run
+        self._ready = False          # companion window reported READY
+        self._hb = QTimer(self)      # heartbeat: keeps status honest while busy
+        self._hb.setInterval(1000)
+        self._hb.timeout.connect(self._heartbeat)
         self._build_ui()
 
     # ------------------------------------------------------------------
@@ -191,6 +205,18 @@ class ScormRuntimeTab(QWidget):
         self._companion_btn.clicked.connect(self._run_companion)
         action_row.addWidget(self._companion_btn)
 
+        self._stop_btn = QPushButton("Stop")
+        self._stop_btn.setFixedHeight(30)
+        self._stop_btn.setFixedWidth(90)
+        self._stop_btn.setEnabled(False)
+        self._stop_btn.setToolTip(
+            "Cancel the current run. Safe to press if it looks stuck loading —\n"
+            "the current stage (unzip / media transcode / launch) will stop and\n"
+            "any browser window will close."
+        )
+        self._stop_btn.clicked.connect(self._stop)
+        action_row.addWidget(self._stop_btn)
+
         self._open_btn = QPushButton("Open Output Folder")
         self._open_btn.setFixedHeight(30)
         self._open_btn.setFixedWidth(150)
@@ -242,6 +268,41 @@ class ScormRuntimeTab(QWidget):
             self._zip_label.setStyleSheet("color: #000;")
 
     # ------------------------------------------------------------------
+    # Run lifecycle helpers
+    # ------------------------------------------------------------------
+
+    def _start_worker(self, argv, mode, status):
+        """Common setup for both entry points: reset state, flip the buttons,
+        start the heartbeat, and launch the worker with a fresh cancel event."""
+        self._mode = mode
+        self._ready = False
+        self._run_start = time.monotonic()
+        self._cancel = threading.Event()
+
+        self._run_btn.setEnabled(False)
+        self._companion_btn.setEnabled(False)
+        self._open_btn.setEnabled(False)
+        self._stop_btn.setEnabled(True)
+        self._progress.show()
+        self._status.setText(status)
+        self._log.clear()
+        self._hb.start()
+
+        signals = _RunSignals()
+        signals.line.connect(self._on_line)
+        signals.finished.connect(self._on_finished)
+        signals.error.connect(self._on_error)
+
+        _RunWorker(argv, signals, self._cancel).start()
+
+    def _reset_buttons(self):
+        self._hb.stop()
+        self._progress.hide()
+        self._run_btn.setEnabled(True)
+        self._companion_btn.setEnabled(True)
+        self._stop_btn.setEnabled(False)
+
+    # ------------------------------------------------------------------
     # Run
     # ------------------------------------------------------------------
 
@@ -262,19 +323,10 @@ class ScormRuntimeTab(QWidget):
         if self._headed_chk.isChecked():
             argv.append("--headed")
 
-        self._run_btn.setEnabled(False)
-        self._companion_btn.setEnabled(False)
-        self._open_btn.setEnabled(False)
-        self._progress.show()
-        self._status.setText("Running runtime QA — this can take several minutes…")
-        self._log.clear()
-
-        signals = _RunSignals()
-        signals.line.connect(self._on_line)
-        signals.finished.connect(self._on_finished)
-        signals.error.connect(self._on_error)
-
-        _RunWorker(argv, signals).start()
+        self._start_worker(
+            argv, "run",
+            "Starting runtime QA — preparing the package "
+            "(courses with video can take a few minutes)…")
 
     def _run_companion(self):
         """Open the course + per-screen companion panel (no auto-driver)."""
@@ -291,43 +343,66 @@ class ScormRuntimeTab(QWidget):
         if self._capture_chk.isChecked():
             argv.append("--capture-shots")
 
-        self._run_btn.setEnabled(False)
-        self._companion_btn.setEnabled(False)
-        self._open_btn.setEnabled(False)
-        self._progress.show()
-        self._status.setText(
-            "Companion open — navigate the course yourself; "
-            "close the course window to stop."
-        )
-        self._log.clear()
+        self._start_worker(
+            argv, "companion",
+            "Preparing the package before the window opens "
+            "(courses with video can take a few minutes)…")
 
-        signals = _RunSignals()
-        signals.line.connect(self._on_line)
-        signals.finished.connect(self._on_finished)
-        signals.error.connect(self._on_error)
+    def _stop(self):
+        if self._cancel is not None:
+            self._cancel.set()
+        self._stop_btn.setEnabled(False)
+        self._status.setText("Stopping — cancelling the current stage…")
 
-        _RunWorker(argv, signals).start()
+    # ------------------------------------------------------------------
+    # Worker callbacks
+    # ------------------------------------------------------------------
+
+    def _heartbeat(self):
+        """Keep the status label honest while a run is in progress so the tab
+        never looks frozen. The log pane shows the detailed per-stage output;
+        this is the at-a-glance 'still working' line."""
+        if self._cancel is not None and self._cancel.is_set():
+            return  # leave the "Stopping…" message in place
+        if self._ready:
+            return  # companion window is up; status already says so
+        secs = int(time.monotonic() - self._run_start)
+        if secs < 30:
+            hint = ""
+        elif secs < 120:
+            hint = " — large videos can take a few minutes. Press Stop to cancel."
+        else:
+            hint = " — if it looks stuck, press Stop."
+        base = ("Preparing the package before the window opens"
+                if self._mode == "companion" else "Running runtime QA")
+        self._status.setText(f"{base}… ({secs}s){hint}")
 
     def _on_line(self, line: str):
         self._log.append(line)
         sb = self._log.verticalScrollBar()
         sb.setValue(sb.maximum())
+        # The CLI prints READY once the companion window is actually open — flip
+        # the status then so it no longer claims to be "preparing".
+        if self._mode == "companion" and not self._ready and "READY" in line:
+            self._ready = True
+            self._status.setText(
+                "Companion open — navigate the course yourself; "
+                "close the course window (or press Stop) to finish.")
 
     def _on_finished(self, rc: int):
-        self._progress.hide()
-        self._run_btn.setEnabled(True)
-        self._companion_btn.setEnabled(True)
+        self._reset_buttons()
         if self._out_dir and Path(self._out_dir).exists():
             self._open_btn.setEnabled(True)
-        self._status.setText(
-            f"Done (exit code {rc}). Outputs in: {self._out_dir}"
-        )
+        if rc == _RC_CANCELLED:
+            self._status.setText("Stopped. No further work was done.")
+        else:
+            self._status.setText(f"Done (exit code {rc}). Outputs in: {self._out_dir}")
+        self._cancel = None
 
     def _on_error(self, msg: str):
-        self._progress.hide()
-        self._run_btn.setEnabled(True)
-        self._companion_btn.setEnabled(True)
+        self._reset_buttons()
         self._status.setText(f"Error: {msg}")
+        self._cancel = None
         QMessageBox.critical(self, "Runtime QA Error", msg)
 
     def _open_output(self):

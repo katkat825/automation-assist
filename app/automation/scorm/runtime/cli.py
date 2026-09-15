@@ -5,10 +5,16 @@
 
 Pipeline: build runtime model -> plan scenarios -> drive each in a fresh
 browser context -> verify -> report. All outputs land in DATA_DIR/<course>/.
+
+Slow stages that run *before* a browser window appears (unzip, media
+transcode, launch) report progress and honor an optional ``cancel`` signal so
+the UI can show what's happening and let the reviewer stop a run that would
+otherwise look frozen.
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import shutil
 import sys
@@ -27,24 +33,76 @@ from .harness import CourseServer, launch
 from .driver import Driver
 from .verifier import verify
 from .reporter import report
+from .cancel import Cancelled, check, is_cancelled
 
 
-def _prepare_course_dir(args):
+def _default_log(msg):
+    print(msg, flush=True)
+
+
+@contextlib.contextmanager
+def _stage(log, name, cancel=None):
+    """Announce a pipeline stage and report how long it took. Checking cancel
+    on entry means a stop request between stages aborts before the slow work."""
+    check(cancel)
+    t0 = time.monotonic()
+    log(f"▶ {name} …")
+    yield
+    log(f"  ✓ {name} ({time.monotonic() - t0:.1f}s)")
+
+
+def _prune_old_caches(cache_root: Path, stem: str, keep: str, log) -> None:
+    """Drop stale extraction caches for the same course (different mtime/size),
+    keeping only the current one so the cache doesn't grow without bound."""
+    try:
+        for d in cache_root.glob(f"{stem}__*"):
+            if d.is_dir() and d.name != keep:
+                shutil.rmtree(d, ignore_errors=True)
+                log(f"cache: removed stale extraction {d.name}")
+    except Exception:  # noqa: BLE001 — pruning is best-effort
+        pass
+
+
+def _prepare_course_dir(args, cancel=None, log=None):
     """Extract the package (or reuse --extract-dir) and transcode media.
-    Returns (course_dir, cleanup_dir_or_None)."""
+    Returns (course_dir, cleanup_dir_or_None).
+
+    For a plain zip we extract into a STABLE per-zip cache dir (keyed by name +
+    mtime + size) rather than a throwaway temp dir. That makes the media-prep
+    marker persist, so a second Companion open of the same package skips both
+    the unzip and the (slow) transcode entirely. cleanup is None for the cache
+    so it survives; a rebuilt package changes the key and re-extracts."""
+    log = log or _default_log
     if args.extract_dir:
-        course_dir = args.extract_dir
-        cleanup = None
+        return args.extract_dir, None
+
+    zp = Path(args.zip_path)
+    try:
+        st = zp.stat()
+        key = f"{zp.stem}__{int(st.st_mtime)}_{st.st_size}"
+    except OSError:
+        key = zp.stem
+    cache_root = Path(args.data_dir) / "_course_cache"
+    cache_root.mkdir(parents=True, exist_ok=True)
+    course_dir = cache_root / key
+    extracted_marker = course_dir / ".qa_extracted.json"
+
+    if extracted_marker.exists():
+        log(f"package: reusing cached extraction ({course_dir.name})")
     else:
-        cleanup = tempfile.mkdtemp(prefix="scorm_course_")
-        course_dir = cleanup
-        print("extracting package ...", flush=True)
-        with zipfile.ZipFile(args.zip_path) as zf:
-            zf.extractall(course_dir)
+        _prune_old_caches(cache_root, zp.stem, keep=key, log=log)
+        shutil.rmtree(course_dir, ignore_errors=True)
+        course_dir.mkdir(parents=True, exist_ok=True)
+        with _stage(log, "extracting package", cancel):
+            with zipfile.ZipFile(args.zip_path) as zf:
+                zf.extractall(course_dir)
+        extracted_marker.write_text(json.dumps(
+            {"zip": str(zp), "extracted_at": datetime.now().isoformat()}))
+
     from .media_prep import prep_media
-    mp = prep_media(course_dir)
-    print(f"media: {len(mp['transcoded'])} transcoded, {len(mp['failed'])} failed", flush=True)
-    return course_dir, cleanup
+    with _stage(log, "preparing media", cancel):
+        prep_media(str(course_dir), cancel=cancel, log=log)
+    return str(course_dir), None
 
 
 class _Settle:
@@ -143,7 +201,7 @@ class _CaptureSession:
             n_manual = sum(1 for r in self.records
                            if r["slide_id"] == slide_id and r["kind"] == "manual")
             tag = f"layer #{n_manual}"
-        print(f"  📸 screen {screen} [{tag}] -> {fname}", flush=True)
+        print(f"  \U0001f4f8 screen {screen} [{tag}] -> {fname}", flush=True)
 
     def finish(self):
         manifest = {
@@ -160,7 +218,7 @@ class _CaptureSession:
               flush=True)
 
 
-def observe(args):
+def observe(args, cancel=None):
     """Passive mode: host the course in a headed browser and get out of the way
     so a human can drive it with a screen reader. Runs NO driver. While idle,
     logs each screen change with a timestamp so the run can later be merged with
@@ -169,7 +227,13 @@ def observe(args):
     Note: screen markers are wall-clock timestamped; the JAWS-side log must use
     the same clock for a precise merge (clock alignment is still an open item).
     """
-    course_dir, cleanup = _prepare_course_dir(args)
+    log = _default_log
+    try:
+        course_dir, cleanup = _prepare_course_dir(args, cancel=cancel, log=log)
+    except Cancelled:
+        log("✖ cancelled before the window opened (during package/media prep).")
+        return 130
+
     screens_log = Path(args.screens_log) if args.screens_log else (
         Path(args.data_dir) / Path(args.zip_path).stem / "screens.log")
     screens_log.parent.mkdir(parents=True, exist_ok=True)
@@ -177,28 +241,40 @@ def observe(args):
     # Build the per-screen companion panel data from the parsed course.
     companion = None
     try:
-        from ..parser import parse_scorm_zip
-        from ..companion import build_companion_data
-        cdata = parse_scorm_zip(args.zip_path)
-        companion = build_companion_data(
-            cdata, dual_path=args.dual_path, non_english=args.non_english)
+        with _stage(log, "indexing screens (companion panel)", cancel):
+            from ..parser import parse_scorm_zip
+            from ..companion import build_companion_data
+            cdata = parse_scorm_zip(args.zip_path)
+            companion = build_companion_data(
+                cdata, dual_path=args.dual_path, non_english=args.non_english)
         n = sum(1 for s in companion["slides"].values() if s["checks"])
-        print(f"companion: {len(companion['slides'])} screens indexed, "
-              f"{n} with check items", flush=True)
+        log(f"companion: {len(companion['slides'])} screens indexed, "
+            f"{n} with check items")
+    except Cancelled:
+        log("✖ cancelled before the window opened (during screen indexing).")
+        if cleanup:
+            shutil.rmtree(cleanup, ignore_errors=True)
+        return 130
     except Exception as e:  # noqa: BLE001 — panel is a convenience, never block QA
-        print(f"companion: disabled ({e!r})", flush=True)
+        log(f"companion: disabled ({e!r})")
 
     # --- optional screenshot capture for course-print generation -------------
     cap = _CaptureSession(args, companion) if args.capture_shots else None
     if cap:
-        print(f"capture: ON — screenshots -> {cap.shots_dir}", flush=True)
-        print("capture: base state grabbed on each new screen; press the panel's "
-              "‘Capture state’ button (or Ctrl+Shift+S) for each layer.", flush=True)
+        log(f"capture: ON — screenshots -> {cap.shots_dir}")
+        log("capture: base state grabbed on each new screen; press the panel's "
+            "‘Capture state’ button (or Ctrl+Shift+S) for each layer.")
 
     srv = CourseServer(course_dir, companion=companion, capture=bool(cap))
     try:
         with sync_playwright() as p:
-            browser, L = launch(p, srv, headless=False, no_viewport=True)
+            try:
+                browser, L = launch(p, srv, headless=False, no_viewport=True,
+                                    cancel=cancel, log=log)
+            except Cancelled:
+                log("✖ cancelled while the course was launching — "
+                    "no window opened.")
+                return 130
             print(f"\nREADY — drive the course yourself in the open window.")
             print(f"Screen changes are being logged to: {screens_log}")
             print("Close the course window (or press Ctrl+C here) when you're done.\n",
@@ -207,6 +283,9 @@ def observe(args):
             settle = _Settle()  # per-screen text-stability tracker for base capture
             try:
                 while True:
+                    if is_cancelled(cancel):
+                        print("\nstopping observe (cancelled) ...", flush=True)
+                        break
                     try:
                         cur = L.current_slide_id()
                     except Exception:
@@ -254,7 +333,7 @@ def observe(args):
     return 0
 
 
-def main(argv=None):
+def main(argv=None, cancel=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("zip_path")
     ap.add_argument("--data-dir", default="data_dir")
@@ -285,55 +364,73 @@ def main(argv=None):
                          "(default: <data-dir>/<course>/course_print_shots)")
     args = ap.parse_args(argv)
 
+    log = _default_log
+
     if args.observe:
-        return observe(args)
+        return observe(args, cancel=cancel)
 
     course_out = Path(args.data_dir) / Path(args.zip_path).stem
     course_out.mkdir(parents=True, exist_ok=True)
 
-    print("[1/5] building runtime model ...", flush=True)
-    rm_obj = build_runtime_model(args.zip_path)
-    rm = json.loads(rm_obj.to_json())
-    (course_out / "runtime_model.json").write_text(json.dumps(rm, indent=1))
-    drivable = sum(1 for q in rm["questions"] if q["drivable"] and not q["is_survey"])
-    graded = sum(1 for q in rm["questions"] if not q["is_survey"])
-    print(f"      {rm['course_title']}: {len(rm['slides'])} slides, "
-          f"{graded} graded ({drivable} drivable), route {len(rm['routes']['forward'])}")
+    try:
+        with _stage(log, "[1/5] building runtime model", cancel):
+            rm_obj = build_runtime_model(args.zip_path)
+            rm = json.loads(rm_obj.to_json())
+            (course_out / "runtime_model.json").write_text(json.dumps(rm, indent=1))
+        drivable = sum(1 for q in rm["questions"] if q["drivable"] and not q["is_survey"])
+        graded = sum(1 for q in rm["questions"] if not q["is_survey"])
+        log(f"      {rm['course_title']}: {len(rm['slides'])} slides, "
+            f"{graded} graded ({drivable} drivable), route {len(rm['routes']['forward'])}")
 
-    print("[2/5] planning scenarios ...", flush=True)
-    planned = plan(rm)
-    (course_out / "scenarios.json").write_text(json.dumps(planned, indent=1))
-    todo = [s for s in planned["scenarios"]
-            if args.scenario in (None, s["id"])]
-    print(f"      {[s['id'] for s in todo]}")
+        with _stage(log, "[2/5] planning scenarios", cancel):
+            planned = plan(rm)
+            (course_out / "scenarios.json").write_text(json.dumps(planned, indent=1))
+        todo = [s for s in planned["scenarios"]
+                if args.scenario in (None, s["id"])]
+        log(f"      {[s['id'] for s in todo]}")
 
-    if args.extract_dir:
-        course_dir = args.extract_dir
-        cleanup = None
-    else:
-        cleanup = tempfile.mkdtemp(prefix="scorm_course_")
-        course_dir = cleanup
-        print("[3/5] extracting package ...", flush=True)
-        with zipfile.ZipFile(args.zip_path) as zf:
-            zf.extractall(course_dir)
+        if args.extract_dir:
+            course_dir = args.extract_dir
+            cleanup = None
+        else:
+            cleanup = tempfile.mkdtemp(prefix="scorm_course_")
+            course_dir = cleanup
+            with _stage(log, "[3/5] extracting package", cancel):
+                with zipfile.ZipFile(args.zip_path) as zf:
+                    zf.extractall(course_dir)
 
-    print("[3b] media prep (open-codec transcode for test browser) ...", flush=True)
-    from .media_prep import prep_media
-    mp = prep_media(course_dir)
-    print(f"      {len(mp['transcoded'])} transcoded, {len(mp['failed'])} failed")
+        from .media_prep import prep_media
+        with _stage(log, "[3b] media prep (open-codec transcode for test browser)", cancel):
+            prep_media(course_dir, cancel=cancel, log=log)
+    except Cancelled:
+        log("✖ cancelled during setup — nothing was driven.")
+        return 130
 
     results = []
-    print("[4/5] driving scenarios ...", flush=True)
+    log("[4/5] driving scenarios ...")
     with sync_playwright() as p:
         for sc in todo:
-            print(f"      >>> {sc['id']}", flush=True)
+            if is_cancelled(cancel):
+                log("✖ cancelled — stopping before the next scenario.")
+                break
+            log(f"      >>> {sc['id']}")
             srv = CourseServer(course_dir)
             browser = None
             try:
-                browser, L = launch(p, srv, headless=not args.headed)
+                browser, L = launch(p, srv, headless=not args.headed,
+                                    cancel=cancel, log=log)
                 drv = Driver(rm, L, str(course_out / "artifacts" / sc["id"]),
                              unlocked=not args.locked)
                 runlog = drv.run(sc)
+            except Cancelled:
+                if browser:
+                    try:
+                        browser.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                srv.close()
+                log("✖ cancelled during launch — stopping.")
+                break
             except Exception as e:                               # noqa: BLE001
                 from .driver import RunLog
                 runlog = RunLog(scenario_id=sc["id"])
@@ -351,12 +448,11 @@ def main(argv=None):
             res = verify(sc, rl, rm)
             results.append(res)
             c = res["counts"]
-            print(f"          {c['VERIFIED_PASS']} pass / {c['VERIFIED_FAIL']} fail "
-                  f"/ {c['BLOCKED']} blocked"
-                  + (f"  [RUN BLOCKED: {res['blocked_reason']}]" if res["blocked"] else ""),
-                  flush=True)
+            log(f"          {c['VERIFIED_PASS']} pass / {c['VERIFIED_FAIL']} fail "
+                f"/ {c['BLOCKED']} blocked"
+                + (f"  [RUN BLOCKED: {res['blocked_reason']}]" if res["blocked"] else ""))
 
-    print("[5/5] reporting ...", flush=True)
+    log("[5/5] reporting ...")
     txt = report(rm, planned, results, str(course_out))
     print(txt)
     if cleanup:

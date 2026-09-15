@@ -7,6 +7,8 @@ from __future__ import annotations
 import functools, http.server, json, threading
 from pathlib import Path
 
+from .cancel import Cancelled, check, is_cancelled
+
 STUB_JS = (Path(__file__).parent / "scorm_stub.js").read_text()
 
 # --- companion side-panel assets (used only when companion data is passed) ---
@@ -287,36 +289,81 @@ class Launched:
         return cls
 
 def launch(playwright, server: CourseServer, headless: bool = True, timeout_s: int = 45,
-           no_viewport: bool = False):
+           no_viewport: bool = False, cancel=None, log=None):
     """Open the course, dismiss the launch/play gate, wait for slide DOM.
 
     no_viewport=True lets the page fill (and resize with) the real browser
     window instead of a fixed 1280x800 viewport — used by --observe so the
     course + companion can be maximized to full monitor. The driver keeps the
-    fixed viewport for deterministic clicking."""
+    fixed viewport for deterministic clicking.
+
+    ``cancel`` (optional, anything with ``is_set()``) lets a caller abort the
+    wait — the browser is closed and :class:`Cancelled` is raised. ``log``
+    (optional) receives a heartbeat while waiting so the launch never looks
+    frozen. Both default to the previous behavior when omitted.
+    """
+    log = log or (lambda m: print(m, flush=True))
     launch_args = ["--start-maximized"] if no_viewport else []
     browser = playwright.chromium.launch(headless=headless, args=launch_args)
-    if no_viewport:
-        context = browser.new_context(no_viewport=True)
-    else:
-        context = browser.new_context(viewport={"width": 1280, "height": 800})
-    page = context.new_page()
-    page.goto(server.launch_url)
-    course = None
-    # wait for the course frame and the play gate
-    for _ in range(timeout_s * 2):
-        page.wait_for_timeout(500)
-        course = next((f for f in page.frames if f.url.endswith("index_lms.html")), None)
-        if course is None:
-            continue
-        gate = course.locator("#mobile-start-button, .mobile-start-overlay.shown button")
-        if gate.count():
-            gate.first.click()
-            break
-        if course.locator(".slide[class*=cs-]").count():
-            break  # no gate on this build
-    else:
-        raise TimeoutError("BLOCKED: launch gate / course frame never appeared")
-    # wait for first slide
-    course.wait_for_selector(".slide[class*=cs-]", timeout=timeout_s * 1000)
-    return browser, Launched(page, course)
+
+    def _abort_browser():
+        try:
+            browser.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    try:
+        if no_viewport:
+            context = browser.new_context(no_viewport=True)
+        else:
+            context = browser.new_context(viewport={"width": 1280, "height": 800})
+        page = context.new_page()
+        page.goto(server.launch_url)
+        course = None
+        stage = "course frame"
+        log(f"launch: opening course, waiting for {stage}…")
+        # wait for the course frame and the play gate (heartbeat every ~5s)
+        iters = timeout_s * 2
+        for i in range(iters):
+            if is_cancelled(cancel):
+                _abort_browser()
+                raise Cancelled()
+            page.wait_for_timeout(500)
+            if i and i % 10 == 0:  # ~every 5s
+                log(f"launch: still waiting for {stage}… "
+                    f"{i // 2}s / {timeout_s}s")
+            course = next((f for f in page.frames
+                           if f.url.endswith("index_lms.html")), None)
+            if course is None:
+                continue
+            stage = "play gate / first slide"
+            gate = course.locator(
+                "#mobile-start-button, .mobile-start-overlay.shown button")
+            if gate.count():
+                log("launch: play gate found — starting course")
+                gate.first.click()
+                break
+            if course.locator(".slide[class*=cs-]").count():
+                break  # no gate on this build
+        else:
+            _abort_browser()
+            raise TimeoutError(
+                f"BLOCKED: {stage} never appeared within {timeout_s}s. "
+                "The course may not have loaded (check media transcode / "
+                "package structure).")
+        # wait for first slide
+        check(cancel)
+        log("launch: waiting for the first slide to mount…")
+        try:
+            course.wait_for_selector(".slide[class*=cs-]", timeout=timeout_s * 1000)
+        except Exception as e:  # noqa: BLE001 — normalize to a clear message
+            _abort_browser()
+            raise TimeoutError(
+                f"BLOCKED: first slide never mounted within {timeout_s}s "
+                f"({type(e).__name__}). The course frame loaded but no slide "
+                "appeared — a video slide may be stuck loading.")
+        log("launch: course ready")
+        return browser, Launched(page, course)
+    except Cancelled:
+        _abort_browser()
+        raise
