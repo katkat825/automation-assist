@@ -732,7 +732,7 @@ class ScormQaTab(QWidget):
         self._non_english_chk = QCheckBox("Non-English course")
         self._non_english_chk.setToolTip(
             "Check if this course's content language is NOT English.\n"
-            "• Spell check and English terminology pairs will be skipped (they hang on non-English text).\n"
+            "• Spell check, English terminology pairs, and em-dash / hyphen checks will be skipped (they misfire on non-English text).\n"
             "• A new \"Untranslated English Text\" check flags slides that still contain English.\n"
             "• Edit _ENGLISH_OK_TERMS in app/automation/scorm/checks/wordlists.py to allow\n"
             "  brand names, acronyms, and loanwords that should stay in English."

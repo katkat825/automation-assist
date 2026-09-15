@@ -199,18 +199,42 @@ def test_unknown_hyphenated_pair_is_still_flagged(monkeypatch):
     assert any("foo-zzz" in w for w in warned)
 
 
-def test_non_english_course_does_not_use_the_dictionary(monkeypatch):
-    """skip_spelling (non-English) keeps the old allowlist-only behaviour so an
-    English dictionary can't wrongly clear a foreign compound."""
+def test_non_english_course_skips_dash_checks(monkeypatch):
+    """Non-English courses skip the whole em-dash / hyphen dash family, because
+    those heuristics are English typography and misfire on foreign text. No dash
+    warning should surface, no matter what the hyphen looks like, and the spell
+    checker is never built."""
     calls = []
     monkeypatch.setattr(
         text_checks, "_get_spell_checker",
         lambda: calls.append(1) or _FakeChecker({"customer", "focused"}),
     )
-    data = make_data([make_slide(texts=["We take a customer-focused approach."])])
-    warned = warns(check_whitespace_and_spelling(data, skip_spelling=True))
-    assert any("customer-focused" in w for w in warned)
+    data = make_data([make_slide(texts=[
+        "We take a customer-focused approach.",   # unspaced hyphen pair
+        "The plan failed -- we regrouped.",        # double hyphen
+        "A break — then more text.",                # spaced em-dash
+    ])])
+    sec = check_whitespace_and_spelling(data, skip_spelling=True)
+    warned = warns(sec)
+    assert not any("customer-focused" in w for w in warned)
+    assert not any("em-dash is intended" in w for w in warned)
+    assert not any("Spaced em-dash" in w for w in warned)
     assert calls == []  # checker never built when spelling is skipped
+    # A single skipped-notice explains why, instead of a misleading pass.
+    assert any(
+        "hyphen checks skipped" in i.message.lower() for i in sec.items
+    )
+
+
+def test_english_course_still_runs_dash_checks(monkeypatch):
+    """Sanity guard: the English path is unchanged — dash checks still fire."""
+    monkeypatch.setattr(
+        text_checks, "_get_spell_checker",
+        lambda: _FakeChecker({"customer"}),  # "focused" unknown -> flagged
+    )
+    data = make_data([make_slide(texts=["We take a customer-focused approach."])])
+    warned = warns(check_whitespace_and_spelling(data, skip_spelling=False))
+    assert any("customer-focused" in w for w in warned)
 
 
 def test_spaced_hyphen_em_dash_flags_regardless_of_dictionary(monkeypatch):

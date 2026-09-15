@@ -183,9 +183,9 @@ def check_whitespace_and_spelling(data: ScormData, skip_spelling: bool = False) 
     _answer_id = re.compile(r'^[A-Ha-h][\.\)]\s')
 
     # Dictionary used to recognise ordinary hyphenated compounds so they are not
-    # flagged as possible missed em-dashes. Only for English courses — for a
-    # non-English course an English dictionary would mis-judge every compound,
-    # so we fall back to the hand-maintained allowlists alone.
+    # flagged as possible missed em-dashes. English courses only — the whole
+    # em-dash / hyphen dash family is skipped for non-English courses (see the
+    # `if not skip_spelling:` guard below), so the checker is never built there.
     hyphen_checker = None if skip_spelling else _get_spell_checker()
 
     for slide in data.slides:
@@ -217,35 +217,40 @@ def check_whitespace_and_spelling(data: ScormData, skip_spelling: bool = False) 
                 snippet = text[start:end].strip()
                 punct_msgs.append(f'Missing space after "{m.group()[0]}" on [{loc}]: "…{snippet}…"')
 
-            # Em-dash with a space on one or both sides (GLS style is unspaced).
-            for m in _EMDASH_SPACING_RE.finditer(text_no_urls):
-                start = max(0, m.start() - 20)
-                end = min(len(text_no_urls), m.end() + 20)
-                snippet = text_no_urls[start:end].strip()
-                emdash_msgs.append(f'[{loc}]: "…{snippet}…"')
+            # Em-dash / hyphen dash checks are English-typography heuristics and
+            # produce noise on non-English text (foreign hyphenated compounds,
+            # different dash conventions), so skip them entirely for a
+            # non-English course. A single skipped-notice is emitted below.
+            if not skip_spelling:
+                # Em-dash with a space on one or both sides (GLS style is unspaced).
+                for m in _EMDASH_SPACING_RE.finditer(text_no_urls):
+                    start = max(0, m.start() - 20)
+                    end = min(len(text_no_urls), m.end() + 20)
+                    snippet = text_no_urls[start:end].strip()
+                    emdash_msgs.append(f'[{loc}]: "…{snippet}…"')
 
-            # Hyphen likely meant to be an em-dash (double / spaced).
-            for m in _WRONG_DASH_RE.finditer(text_no_urls):
-                start = max(0, m.start() - 20)
-                end = min(len(text_no_urls), m.end() + 20)
-                snippet = text_no_urls[start:end].strip()
-                found = m.group().strip()
-                wrongdash_msgs.append(f'[{loc}] found "{found}": "…{snippet}…"')
+                # Hyphen likely meant to be an em-dash (double / spaced).
+                for m in _WRONG_DASH_RE.finditer(text_no_urls):
+                    start = max(0, m.start() - 20)
+                    end = min(len(text_no_urls), m.end() + 20)
+                    snippet = text_no_urls[start:end].strip()
+                    found = m.group().strip()
+                    wrongdash_msgs.append(f'[{loc}] found "{found}": "…{snippet}…"')
 
-            # Unspaced hyphen between words — flag unless a known compound.
-            for m in _HYPHEN_PAIR_RE.finditer(text_no_urls):
-                token = m.group()
-                low = token.lower()
-                parts = low.split("-")
-                if (low in _HYPHEN_COMPOUND_OK
-                        or parts[0] in _HYPHEN_PREFIXES
-                        or parts[-1] in _HYPHEN_SUFFIXES
-                        or _is_known_compound(parts, hyphen_checker)):
-                    continue
-                start = max(0, m.start() - 20)
-                end = min(len(text_no_urls), m.end() + 20)
-                snippet = text_no_urls[start:end].strip()
-                wrongdash_msgs.append(f'[{loc}] found "{token}": "…{snippet}…"')
+                # Unspaced hyphen between words — flag unless a known compound.
+                for m in _HYPHEN_PAIR_RE.finditer(text_no_urls):
+                    token = m.group()
+                    low = token.lower()
+                    parts = low.split("-")
+                    if (low in _HYPHEN_COMPOUND_OK
+                            or parts[0] in _HYPHEN_PREFIXES
+                            or parts[-1] in _HYPHEN_SUFFIXES
+                            or _is_known_compound(parts, hyphen_checker)):
+                        continue
+                    start = max(0, m.start() - 20)
+                    end = min(len(text_no_urls), m.end() + 20)
+                    snippet = text_no_urls[start:end].strip()
+                    wrongdash_msgs.append(f'[{loc}] found "{token}": "…{snippet}…"')
 
     # --- Emit extra spaces ---
     if extra_space_msgs:
@@ -261,29 +266,33 @@ def check_whitespace_and_spelling(data: ScormData, skip_spelling: bool = False) 
     else:
         sec.add("pass", "No missing spaces after punctuation detected")
 
-    # --- Emit em-dash spacing issues ---
-    if emdash_msgs:
-        for msg in emdash_msgs:
-            sec.add("warn", f"Spaced em-dash (should be unspaced) on {msg}")
+    # --- Emit em-dash / hyphen dash issues (English courses only) ---
+    if skip_spelling:
+        sec.add("info", "Em-dash / hyphen checks skipped — non-English course")
     else:
-        sec.add("pass", "No spaced em-dashes detected (all em-dashes are unspaced)")
+        # --- Emit em-dash spacing issues ---
+        if emdash_msgs:
+            for msg in emdash_msgs:
+                sec.add("warn", f"Spaced em-dash (should be unspaced) on {msg}")
+        else:
+            sec.add("pass", "No spaced em-dashes detected (all em-dashes are unspaced)")
 
-    # --- Emit wrong-dash (hyphen-for-em-dash) issues ---
-    if wrongdash_msgs:
-        for msg in wrongdash_msgs:
-            sec.add("warn", f"Possible hyphen where an em-dash is intended on {msg}")
-        sec.add(
-            "info",
-            "Note: heuristic — double hyphens, spaced hyphens, and unspaced "
-            "hyphenated word pairs are flagged as possible missed em-dashes. "
-            "Compounds whose parts are all real dictionary words are now "
-            "auto-suppressed (English courses only), so most legitimate "
-            "compounds no longer appear here. If one still slips through — a "
-            "proper noun or coined term the dictionary doesn't know — add it to "
-            "_HYPHEN_COMPOUND_OK (or a prefix/suffix set) in checks/wordlists.py.",
-        )
-    else:
-        sec.add("pass", "No misused hyphens detected where an em-dash may be intended")
+        # --- Emit wrong-dash (hyphen-for-em-dash) issues ---
+        if wrongdash_msgs:
+            for msg in wrongdash_msgs:
+                sec.add("warn", f"Possible hyphen where an em-dash is intended on {msg}")
+            sec.add(
+                "info",
+                "Note: heuristic — double hyphens, spaced hyphens, and unspaced "
+                "hyphenated word pairs are flagged as possible missed em-dashes. "
+                "Compounds whose parts are all real dictionary words are now "
+                "auto-suppressed (English courses only), so most legitimate "
+                "compounds no longer appear here. If one still slips through — a "
+                "proper noun or coined term the dictionary doesn't know — add it to "
+                "_HYPHEN_COMPOUND_OK (or a prefix/suffix set) in checks/wordlists.py.",
+            )
+        else:
+            sec.add("pass", "No misused hyphens detected where an em-dash may be intended")
 
     # --- Spell check (grouped last) ---
     if skip_spelling:

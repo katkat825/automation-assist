@@ -354,7 +354,7 @@ def main(argv=None, cancel=None):
                     help="observe: treat as a dual-path course (adds accessibility "
                          "checks to the companion panel)")
     ap.add_argument("--non-english", action="store_true",
-                    help="observe: course is not in English (skips spell/terminology)")
+                    help="observe: course is not in English (skips spell/terminology and em-dash/hyphen checks)")
     ap.add_argument("--capture-shots", action="store_true",
                     help="observe: capture course screenshots for the course print — "
                          "base state auto-grabbed per screen, plus the panel's "
