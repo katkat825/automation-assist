@@ -14,6 +14,8 @@ from .wordlists import (
     _ENGLISH_WORD_RE,
     _NON_ENGLISH_FALSE_POSITIVES,
     _UNTRANSLATED_MIN_WORDS,
+    _TARGET_LANGUAGES,
+    base_language_code,
     _URL_RE,
     _EMAIL_RE,
 )
@@ -22,6 +24,7 @@ try:
     from spellchecker import SpellChecker as _SpellChecker
     _SPELLCHECKER_AVAILABLE = True
 except ImportError:
+    _SpellChecker = None  # always defined so it can be patched in tests
     _SPELLCHECKER_AVAILABLE = False
 
 
@@ -114,12 +117,23 @@ def check_terminology(data: ScormData) -> Section:
     return sec
 
 
-def check_untranslated_english(data: ScormData) -> Section:
+def check_untranslated_english(data: ScormData, target_lang=None) -> Section:
     """
     For non-English courses, flag text elements that contain a meaningful
-    amount of English. A text element is flagged when it contains
-    _UNTRANSLATED_MIN_WORDS or more English dictionary words that are not
-    in the _ENGLISH_OK_TERMS allowlist.
+    amount of English.
+
+    A word counts as untranslated English only when it is an English
+    dictionary word AND is NOT a valid word in the course's target language
+    (so cognates like Spanish "final"/"total"/"social", which are also English
+    words, are not flagged). A text element is flagged when it contains
+    _UNTRANSLATED_MIN_WORDS or more such words, after removing the
+    _ENGLISH_OK_TERMS allowlist.
+
+    ``target_lang`` is the course language (e.g. "de", "de-DE"). If it is
+    missing, or names a language pyspellchecker has no dictionary for, the
+    check is skipped — an English dictionary alone can't tell untranslated
+    English from ordinary words in an unknown language, so running it would
+    only produce noise.
     """
     sec = Section("Untranslated English Text")
 
@@ -127,6 +141,34 @@ def check_untranslated_english(data: ScormData) -> Section:
         sec.add(
             "info",
             "Cannot check — install pyspellchecker (pip install pyspellchecker)",
+        )
+        return sec
+
+    base = base_language_code(target_lang)
+    if base is None:
+        sec.add(
+            "info",
+            "Untranslated-English check skipped — no course language selected. "
+            "Pick the language (SCORM QA tab) or name it in the filename "
+            "(e.g. _de-DE_) so the target-language dictionary can be used.",
+        )
+        return sec
+    if base not in _TARGET_LANGUAGES:
+        sec.add(
+            "info",
+            f"Untranslated-English check skipped — no dictionary available for "
+            f"language '{target_lang}'. Supported: "
+            f"{', '.join(f'{n} ({c})' for c, n in sorted(_TARGET_LANGUAGES.items(), key=lambda kv: kv[1]))}.",
+        )
+        return sec
+
+    try:
+        target_checker = _SpellChecker(language=base)
+    except Exception as e:  # noqa: BLE001 — missing/broken dictionary => skip, don't crash
+        sec.add(
+            "info",
+            f"Untranslated-English check skipped — could not load the "
+            f"{_TARGET_LANGUAGES[base]} ({base}) dictionary ({e!r}).",
         )
         return sec
 
@@ -160,8 +202,15 @@ def check_untranslated_english(data: ScormData) -> Section:
             if len(candidates) < _UNTRANSLATED_MIN_WORDS:
                 continue
 
-            unknown_set = checker.unknown(candidates)
-            english_words = [w for w in candidates if w not in unknown_set]
+            # English words = known to the English dictionary...
+            english_unknown = checker.unknown(candidates)
+            # ...but a word that is also valid in the target language is a
+            # legitimate target-language word, not untranslated English.
+            target_unknown = target_checker.unknown(candidates)
+            english_words = [
+                w for w in candidates
+                if w not in english_unknown and w in target_unknown
+            ]
 
             if len(english_words) >= _UNTRANSLATED_MIN_WORDS:
                 snippet = text.strip()[:140]

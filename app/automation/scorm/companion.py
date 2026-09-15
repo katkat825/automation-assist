@@ -76,6 +76,7 @@ def build_companion_data(
     story: Optional[StoryData] = None,
     dual_path: bool = False,
     non_english: bool = False,
+    target_lang=None,
 ) -> dict:
     """Assemble the per-screen companion index. Returns a JSON-ready dict:
 
@@ -92,7 +93,7 @@ def build_companion_data(
           },
         }
     """
-    report = run_all_checks(data, story, dual_path=dual_path, non_english=non_english)
+    report = run_all_checks(data, story, dual_path=dual_path, non_english=non_english, target_lang=target_lang)
 
     # --- screen_id (m#s#) and path, joined from the screen table by lms_id ---
     table_by_lms: dict = {}

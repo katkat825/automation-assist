@@ -32,6 +32,7 @@ def run_all_checks(
     story: Optional[StoryData] = None,
     dual_path: bool = False,
     non_english: bool = False,
+    target_lang=None,
 ) -> Report:
     report = Report(parse_errors=data.parse_errors[:])
     if story:
@@ -53,7 +54,7 @@ def run_all_checks(
     # English-specific checks: only meaningful when the course IS in English.
     # For non-English courses, swap in the untranslated-English check instead.
     if non_english:
-        sections.append(check_untranslated_english(data))
+        sections.append(check_untranslated_english(data, target_lang=target_lang))
     else:
         sections.insert(5, check_terminology(data))
 

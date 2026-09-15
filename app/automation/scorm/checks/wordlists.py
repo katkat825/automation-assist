@@ -582,3 +582,67 @@ _HYPHEN_COMPOUND_OK: set[str] = {
 # acronyms or single brand names that may legitimately appear.
 _UNTRANSLATED_MIN_WORDS = 3
 
+
+# ==========================================================================
+# Target-language support for the untranslated-English check
+# ==========================================================================
+#
+# The untranslated-English check needs a dictionary for the course's target
+# language: a word only counts as "untranslated English" if it is an English
+# word AND is NOT a valid word in the target language (so a Spanish course's
+# "final", "total", "social" — all real Spanish words — are not flagged just
+# because they also exist in English).
+#
+# pyspellchecker only ships dictionaries for a subset of languages. Base ISO
+# code -> display name for the ones we can check. English is intentionally
+# excluded (that is the normal, checkbox-off path). Any non-English course
+# whose base language is NOT a key here has no dictionary, so the
+# untranslated-English check is skipped for it.
+#
+# NOTE: this list reflects pyspellchecker's documented bundled dictionaries.
+# check_untranslated_english also loads the dictionary inside a try/except and
+# skips gracefully if a language named here is not actually installed, so an
+# out-of-date entry degrades safely rather than crashing.
+_TARGET_LANGUAGES: dict[str, str] = {
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+    "pt": "Portuguese",
+    "it": "Italian",
+    "nl": "Dutch",
+    "ru": "Russian",
+}
+
+# A language subtag pair like en-US / de-DE / es-LA / fr-CA / pt-BR / zh-CN,
+# hyphen or underscore, not embedded in a longer letter run. Used to pull the
+# language out of GLS course filenames (…_de-DE_…) and to normalise a code the
+# UI / CLI passes in.
+_LANG_PAIR_RE = re.compile(r"(?<![A-Za-z])([A-Za-z]{2})[-_]([A-Za-z]{2})(?![A-Za-z])")
+
+
+def base_language_code(code):
+    """Normalise a language code to its lowercase 2-letter base.
+
+    'de-DE' / 'de_DE' / 'DE' / 'de' -> 'de'. Returns None if `code` is empty
+    or not a recognisable language code.
+    """
+    if not code:
+        return None
+    code = code.strip()
+    m = re.fullmatch(r"([A-Za-z]{2})(?:[-_][A-Za-z]{2})?", code)
+    return m.group(1).lower() if m else None
+
+
+def detect_language_from_filename(name):
+    """Return the base language code embedded in a SCORM filename, or None.
+
+    GLS names embed the language as a delimited subtag, e.g.
+    'GLSsh_11594_de-DE_AntiPhishEss_v4-03_sc24.zip' -> 'de'. The first such
+    xx-YY pair wins; unrelated tokens like 'FOR-QA' or 'v4-03' don't match.
+    """
+    if not name:
+        return None
+    m = _LANG_PAIR_RE.search(name)
+    return m.group(1).lower() if m else None
+
+

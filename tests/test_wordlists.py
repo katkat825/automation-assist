@@ -139,3 +139,48 @@ def test_ignore_dup_title_leaves_real_titles_alone():
 
 def test_wrong_dash_regex_flags_double_hyphen():
     assert W._WRONG_DASH_RE.search("wait--stop")
+
+
+# --- language code parsing (target-language selection) --------------------
+
+def test_target_languages_keys_are_lowercase_two_letter():
+    for code in W._TARGET_LANGUAGES:
+        assert re.fullmatch(r"[a-z]{2}", code), code
+
+
+def test_target_languages_excludes_english():
+    # English is the normal (checkbox-off) path, never a target-language choice.
+    assert "en" not in W._TARGET_LANGUAGES
+
+
+def test_base_language_code_normalises_region_and_case():
+    assert W.base_language_code("de-DE") == "de"
+    assert W.base_language_code("es_LA") == "es"
+    assert W.base_language_code("FR-ca") == "fr"
+    assert W.base_language_code("pt") == "pt"
+    assert W.base_language_code("ZH-CN") == "zh"
+
+
+def test_base_language_code_rejects_non_codes():
+    for bad in (None, "", "FOR-QA", "v4-03", "AntiPhish", "1234"):
+        assert W.base_language_code(bad) is None
+
+
+def test_detect_language_from_gls_filenames():
+    cases = {
+        "GLSsh_11594_de-DE_AntiPhishEss_v4-03_sc24_FOR-QA.zip": "de",
+        "GLSsh_11594_es-LA_AntiPhishEss_v4-03_sc24_FOR-QA.zip": "es",
+        "GLSsh_11594_fr-CA_AntiPhishEss_v4-03_sc24_FOR-QA.zip": "fr",
+        "GLSsh_11594_pt-BR_AntiPhishEss_v4-03_sc24_FOR-QA.zip": "pt",
+        "GLSsh_11594_zh-CN_AntiPhishEss_v4-03_sc24_FOR-QA.zip": "zh",
+        "GLSsh_11594_en-US_AntiPhishEss_v4-03_sc24.zip": "en",
+        "11570A_owasp2025_en-US_v1_27-final.story": "en",
+    }
+    for name, expected in cases.items():
+        assert W.detect_language_from_filename(name) == expected, name
+
+
+def test_detect_language_ignores_non_language_tokens():
+    # No xx-YY language subtag present -> None (must not match FOR-QA, v4-03…).
+    assert W.detect_language_from_filename("CPOC2026_11569_v4-04.docx") is None
+    assert W.detect_language_from_filename("report_FOR-QA_v4-03.zip") is None

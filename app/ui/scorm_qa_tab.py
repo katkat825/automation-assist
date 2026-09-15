@@ -23,11 +23,14 @@ from PySide6.QtWidgets import (
     QPushButton, QFileDialog, QTabWidget, QTextEdit,
     QTableWidget, QTableWidgetItem, QHeaderView, QGroupBox,
     QProgressBar, QSizePolicy, QApplication, QMessageBox,
-    QCheckBox, QScrollArea, QFrame,
+    QCheckBox, QScrollArea, QFrame, QComboBox,
 )
 
 from ..automation.scorm.parser import parse_scorm_zip, parse_story_file
 from ..automation.scorm.checks import run_all_checks, global_search
+from ..automation.scorm.checks.wordlists import (
+    _TARGET_LANGUAGES, detect_language_from_filename,
+)
 from ..automation.scorm.automation_model import build_automation_model, format_report
 
 
@@ -67,13 +70,14 @@ class _WorkerSignals(QObject):
 
 
 class _AnalysisWorker(threading.Thread):
-    def __init__(self, zip_path, story_path, signals, dual_path=False, non_english=False):
+    def __init__(self, zip_path, story_path, signals, dual_path=False, non_english=False, target_lang=None):
         super().__init__(daemon=True)
         self.zip_path = zip_path
         self.story_path = story_path
         self.signals = signals
         self.dual_path = dual_path
         self.non_english = non_english
+        self.target_lang = target_lang
 
     def run(self):
         try:
@@ -84,6 +88,7 @@ class _AnalysisWorker(threading.Thread):
                 story_data,
                 dual_path=self.dual_path,
                 non_english=self.non_english,
+                target_lang=self.target_lang,
             )
             # Automation model is a separate feature; never let it fail the run.
             try:
@@ -733,11 +738,34 @@ class ScormQaTab(QWidget):
         self._non_english_chk.setToolTip(
             "Check if this course's content language is NOT English.\n"
             "• Spell check, English terminology pairs, and em-dash / hyphen checks will be skipped (they misfire on non-English text).\n"
-            "• A new \"Untranslated English Text\" check flags slides that still contain English.\n"
+            "• A new \"Untranslated English Text\" check flags slides that still contain English (pick the course Language at right).\n"
             "• Edit _ENGLISH_OK_TERMS in app/automation/scorm/checks/wordlists.py to allow\n"
             "  brand names, acronyms, and loanwords that should stay in English."
         )
         action_row.addWidget(self._non_english_chk)
+
+        # Target-language picker for the Untranslated English Text check.
+        # Only languages with a dictionary are offered; anything else skips
+        # that check. Auto-selected from the filename when a package is chosen.
+        self._lang_label = QLabel("Language:")
+        self._lang_combo = QComboBox()
+        self._lang_combo.addItem("(select…)", None)
+        for _code, _name in sorted(_TARGET_LANGUAGES.items(), key=lambda kv: kv[1]):
+            self._lang_combo.addItem(f"{_name} ({_code})", _code)
+        self._lang_combo.setToolTip(
+            "Target language for the Untranslated English Text check.\n"
+            "• Only languages with a spell dictionary are listed — a course in "
+            "any other language skips that check.\n"
+            "• Auto-selected from the SCORM filename (…_de-DE_…) when you pick "
+            "a package; you can override it here."
+        )
+        self._lang_label.setEnabled(False)
+        self._lang_combo.setEnabled(False)
+        self._non_english_chk.toggled.connect(self._lang_label.setEnabled)
+        self._non_english_chk.toggled.connect(self._lang_combo.setEnabled)
+        action_row.addSpacing(6)
+        action_row.addWidget(self._lang_label)
+        action_row.addWidget(self._lang_combo)
 
         action_row.addStretch()
         root.addLayout(action_row)
@@ -785,6 +813,16 @@ class ScormQaTab(QWidget):
             self._zip_label.setText(os.path.basename(path))
             self._zip_label.setToolTip(path)
             self._zip_label.setStyleSheet("color: #000;")
+            # Auto-configure language from the GLS filename convention.
+            base = detect_language_from_filename(os.path.basename(path))
+            if base == "en":
+                self._non_english_chk.setChecked(False)
+            elif base:
+                self._non_english_chk.setChecked(True)  # enables the combo
+                idx = self._lang_combo.findData(base)
+                # Supported -> select it; non-English but unsupported -> leave
+                # on the placeholder so the check skips with a clear notice.
+                self._lang_combo.setCurrentIndex(idx if idx >= 0 else 0)
 
     def _browse_story(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -828,10 +866,15 @@ class ScormQaTab(QWidget):
         signals.finished.connect(self._on_finished)
         signals.error.connect(self._on_error)
 
+        target_lang = (
+            self._lang_combo.currentData()
+            if self._non_english_chk.isChecked() else None
+        )
         worker = _AnalysisWorker(
             self._zip_path, self._story_path, signals,
             dual_path=self._dual_path_chk.isChecked(),
             non_english=self._non_english_chk.isChecked(),
+            target_lang=target_lang,
         )
         worker.start()
 

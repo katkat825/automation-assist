@@ -244,9 +244,25 @@ def observe(args, cancel=None):
         with _stage(log, "indexing screens (companion panel)", cancel):
             from ..parser import parse_scorm_zip
             from ..companion import build_companion_data
+            from ..checks.wordlists import (
+                base_language_code, detect_language_from_filename,
+            )
+            # Determine the course language: explicit --lang wins, else the
+            # code embedded in the SCORM filename (GLS convention …_de-DE_…).
+            target_lang = args.lang or detect_language_from_filename(
+                Path(args.zip_path).name)
+            base = base_language_code(target_lang)
+            # A detected non-English language implies non-English handling even
+            # when --non-english wasn't passed; English / unknown falls back to
+            # the flag so behavior is unchanged for those.
+            non_english = args.non_english or (base is not None and base != "en")
+            if target_lang:
+                log(f"companion: course language = {target_lang} "
+                    f"(non-English={non_english})")
             cdata = parse_scorm_zip(args.zip_path)
             companion = build_companion_data(
-                cdata, dual_path=args.dual_path, non_english=args.non_english)
+                cdata, dual_path=args.dual_path, non_english=non_english,
+                target_lang=target_lang)
         n = sum(1 for s in companion["slides"].values() if s["checks"])
         log(f"companion: {len(companion['slides'])} screens indexed, "
             f"{n} with check items")
@@ -355,6 +371,12 @@ def main(argv=None, cancel=None):
                          "checks to the companion panel)")
     ap.add_argument("--non-english", action="store_true",
                     help="observe: course is not in English (skips spell/terminology and em-dash/hyphen checks)")
+    ap.add_argument("--lang", default=None,
+                    help="observe: course language code (e.g. de-DE, es-LA, fr-CA). "
+                         "Used to pick the target-language dictionary for the "
+                         "untranslated-English check. Default: auto-detected from "
+                         "the SCORM filename (…_de-DE_…). A non-English language "
+                         "here also implies --non-english.")
     ap.add_argument("--capture-shots", action="store_true",
                     help="observe: capture course screenshots for the course print — "
                          "base state auto-grabbed per screen, plus the panel's "

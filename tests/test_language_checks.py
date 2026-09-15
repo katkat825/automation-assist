@@ -152,29 +152,109 @@ def test_a_note_about_scope_is_always_appended():
 
 def test_english_sentence_in_a_translated_course_is_flagged():
     data = make_data([make_slide(texts=["Please review the security policy before continuing."])])
-    assert warns(check_untranslated_english(data))
+    assert warns(check_untranslated_english(data, target_lang="es"))
 
 
 def test_short_english_fragments_are_below_the_threshold():
     """A stray acronym or brand name should not trip the check."""
     data = make_data([make_slide(texts=["VPN"])])
-    assert not warns(check_untranslated_english(data))
+    assert not warns(check_untranslated_english(data, target_lang="es"))
 
 
 def test_urls_do_not_count_as_english_text():
     data = make_data([make_slide(texts=["https://example.com/security/policy/review"])])
-    assert not warns(check_untranslated_english(data))
+    assert not warns(check_untranslated_english(data, target_lang="es"))
 
 
 def test_email_addresses_do_not_count_as_english_text():
     data = make_data([make_slide(texts=["soporte@example.com"])])
-    assert not warns(check_untranslated_english(data))
+    assert not warns(check_untranslated_english(data, target_lang="es"))
 
 
 def test_accented_text_is_not_treated_as_english():
     data = make_data([make_slide(texts=["Revisión de la política de seguridad непонятно"])])
-    assert not warns(check_untranslated_english(data))
+    assert not warns(check_untranslated_english(data, target_lang="es"))
 
 
 def test_empty_course_does_not_crash():
-    assert check_untranslated_english(make_data([])).title
+    assert check_untranslated_english(make_data([]), target_lang="es").title
+
+
+# --- target-language dictionary behavior (deterministic; fake checker) -----
+#
+# These exercise the target-language subtraction without needing pyspellchecker
+# installed, by monkeypatching a fake checker whose vocabulary we control.
+
+from app.automation.scorm.checks import language_checks as _lc
+
+
+class _FakeSpell:
+    """Minimal stand-in for pyspellchecker. Vocabulary depends on the
+    requested language, mirroring how a real per-language dictionary differs.
+    ``unknown(words)`` returns the words NOT in that vocabulary (real API)."""
+
+    _VOCAB = {
+        None: {"zzalpha", "zzbeta", "zzgamma", "zzone", "zztwo", "zzthree"},  # "English"
+        "en": {"zzalpha", "zzbeta", "zzgamma", "zzone", "zztwo", "zzthree"},
+        "es": {"zzalpha", "zzbeta", "zzgamma"},  # shared cognates only
+    }
+
+    def __init__(self, language=None):
+        self._vocab = self._VOCAB.get(language, set())
+
+    def unknown(self, words):
+        return {w for w in words if w.lower() not in self._vocab}
+
+
+def _patch_fake(monkeypatch):
+    monkeypatch.setattr(_lc, "_SPELLCHECKER_AVAILABLE", True)
+    monkeypatch.setattr(_lc, "_SpellChecker", _FakeSpell)
+
+
+def test_untranslated_skipped_when_no_language_selected(monkeypatch):
+    _patch_fake(monkeypatch)
+    data = make_data([make_slide(texts=["zzone zztwo zzthree extra"])])
+    sec = check_untranslated_english(data, target_lang=None)
+    assert not warns(sec)
+    assert any("no course language" in i.message.lower() for i in sec.items)
+
+
+def test_untranslated_skipped_for_unsupported_language(monkeypatch):
+    _patch_fake(monkeypatch)
+    data = make_data([make_slide(texts=["zzone zztwo zzthree extra"])])
+    sec = check_untranslated_english(data, target_lang="zh-CN")
+    assert not warns(sec)
+    assert any("no dictionary available" in i.message.lower() for i in sec.items)
+
+
+def test_english_only_run_is_flagged_in_supported_language(monkeypatch):
+    _patch_fake(monkeypatch)
+    data = make_data([make_slide(texts=["zzone zztwo zzthree together here"])])
+    assert warns(check_untranslated_english(data, target_lang="es-LA"))
+
+
+def test_target_language_words_are_not_flagged(monkeypatch):
+    """Words valid in the target language are not untranslated English, even
+    though the English dictionary also knows them (cognate suppression)."""
+    _patch_fake(monkeypatch)
+    data = make_data([make_slide(texts=["zzalpha zzbeta zzgamma word"])])
+    assert not warns(check_untranslated_english(data, target_lang="es"))
+
+
+def test_missing_target_dictionary_skips_gracefully(monkeypatch):
+    """If the named language's dictionary can't be loaded, skip with a notice
+    rather than crashing."""
+    monkeypatch.setattr(_lc, "_SPELLCHECKER_AVAILABLE", True)
+
+    class _Raises:
+        def __init__(self, language=None):
+            if language is not None:
+                raise RuntimeError("no dictionary")
+        def unknown(self, words):
+            return set(words)
+
+    monkeypatch.setattr(_lc, "_SpellChecker", _Raises)
+    data = make_data([make_slide(texts=["zzone zztwo zzthree here"])])
+    sec = check_untranslated_english(data, target_lang="de")
+    assert not warns(sec)
+    assert any("could not load" in i.message.lower() for i in sec.items)
