@@ -1,15 +1,16 @@
-import time
 from datetime import datetime
 from typing import Callable, Optional
 
 from playwright.sync_api import sync_playwright
+
+from app.automation.website import wp_login
 
 
 def clear_wp_cache(
     wp_admin_url: str,
     username: str,
     password: str,
-    headless: bool = True,
+    headless: bool = False,
     log: Optional[Callable[[str], None]] = None,
 ):
     def _log(msg: str):
@@ -24,47 +25,14 @@ def clear_wp_cache(
 
     try:
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=headless)
+            # Always headed: the Cloudflare check on wp-login.php needs a person
+            # to click it. `headless` is kept for call compatibility but ignored.
+            browser = pw.chromium.launch(headless=False)
             context = browser.new_context()
             page = context.new_page()
 
-            # --- LOGIN ---
-            login_url = f"{base}/wp-login.php"
-            _log(f"Logging in: {login_url}")
-
-            page.goto(login_url, wait_until="load")
-
-            # GoDaddy-hosted WP shows an SSO form that hides the standard
-            # user/pass fields behind a toggle, and it renders that toggle via
-            # JS AFTER load — so a single click + wait is a race that fails
-            # intermittently. Retry until the standard field is actually visible:
-            # poll for #user_login, clicking the SSO toggle whenever it appears,
-            # up to a generous deadline.
-            deadline = time.time() + 30
-            while time.time() < deadline:
-                try:
-                    if page.locator("#user_login").is_visible():
-                        break
-                except Exception:
-                    pass
-                try:
-                    toggle = page.locator(".wpaas-sso-login-toggle")
-                    if toggle.count() and toggle.first.is_visible():
-                        toggle.first.click()
-                except Exception:
-                    pass
-                page.wait_for_timeout(500)
-
-            # Final wait (raises with a clear message if the field truly never showed).
-            page.locator("#user_login").wait_for(state="visible", timeout=10000)
-            page.locator("#user_login").fill(username)
-            page.locator("#user_pass").fill(password)
-
-            page.locator("#user_pass").press("Enter")
-
-            page.wait_for_url("**/wp-admin/**", timeout=30000)
-
-            _log("Login successful.")
+            # --- LOGIN (headed; you may need to click the Cloudflare check) ---
+            wp_login.login(page, base, username, password, _log)
 
             # --- ELEMENTOR CACHE ---
             tools_url = f"{base}/wp-admin/admin.php?page=elementor-tools"

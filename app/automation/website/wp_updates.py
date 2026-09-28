@@ -11,6 +11,8 @@ from typing import Callable, Optional
 
 from playwright.sync_api import sync_playwright
 
+from app.automation.website import wp_login
+
 
 @dataclass
 class PluginUpdate:
@@ -124,7 +126,7 @@ def check_wp_updates(
     wp_admin_url: str,
     username: str,
     password: str,
-    headless: bool = True,
+    headless: bool = False,
     log: Optional[Callable[[str], None]] = None,
 ) -> WpUpdateResult:
     """
@@ -136,7 +138,8 @@ def check_wp_updates(
     wp_admin_url : Base URL of the site or the /wp-admin URL — both work.
     username     : WordPress admin username or email.
     password     : WordPress admin password.
-    headless     : Run Playwright browser headless (default True for scheduled runs).
+    headless     : Ignored — always runs headed so a person can complete the
+                   Cloudflare check on wp-login.php. Kept for call compatibility.
     log          : Optional callback for progress messages.
     """
     def _log(msg: str):
@@ -151,33 +154,12 @@ def check_wp_updates(
 
     try:
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=headless)
+            browser = pw.chromium.launch(headless=False)
             context = browser.new_context()
             page = context.new_page()
 
-            # --- Login ---
-            login_url = f"{base}/wp-login.php"
-            _log(f"Logging in: {login_url}")
-
-            page.goto(login_url, wait_until="domcontentloaded")
-
-            # GoDaddy-hosted WP shows an SSO form that hides the standard fields.
-            # Try clicking the "log in with username and password" toggle; ignore
-            # the error if the button doesn't exist on this host.
-            try:
-                page.locator(".wpaas-sso-login-toggle").click(timeout=4000)
-            except Exception:
-                pass
-
-            # Wait for the standard login fields to become visible before filling.
-            page.locator("#user_login").wait_for(state="visible", timeout=10000)
-            page.locator("#user_login").fill(username)
-            page.locator("#user_pass").fill(password)
-
-            page.locator("#user_pass").press("Enter")
-
-            page.wait_for_url("**/wp-admin/**", timeout=30000)
-            _log("Login successful.")
+            # --- Login (headed; you may need to click the Cloudflare check) ---
+            wp_login.login(page, base, username, password, _log)
 
             # --- Navigate to updates page ---
             # force-check=1 tells WordPress to bypass its cached transient and

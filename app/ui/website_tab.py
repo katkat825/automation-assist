@@ -341,7 +341,7 @@ class WebsiteTab(QWidget):
                 wp_admin_url=wp_cfg.get("wp_admin_url", ""),
                 username=wp_cfg.get("wp_username", ""),
                 password=wp_cfg.get("wp_password", ""),
-                headless=True,
+                headless=False,
                 log=lambda msg: self._signals.wp_log.emit(msg),
             )
             self._signals.wp_finished.emit(result)
@@ -416,7 +416,7 @@ class WebsiteTab(QWidget):
                 wp_admin_url=wp_cfg.get("wp_admin_url", ""),
                 username=wp_cfg.get("wp_username", ""),
                 password=wp_cfg.get("wp_password", ""),
-                headless=wp_cfg.get("headless", True),
+                headless=False,
                 log=lambda msg: self._signals.cache_log.emit(msg),
             )
 
