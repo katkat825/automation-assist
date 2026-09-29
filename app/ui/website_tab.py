@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QSplitter, QMessageBox,
 )
 
+from app.automation.website import wp_login
 from app.automation.website.cache_clear import clear_wp_cache
 from app.automation.website.wp_updates import check_wp_updates, WpUpdateResult
 from app.automation.website.site_checker import check_site, SiteCheckResult
@@ -145,8 +146,16 @@ class WebsiteTab(QWidget):
             "QPushButton:disabled { background: #6c757d; }"
         )
 
+        self._wp_browser_btn = QPushButton("Open WordPress Browser")
+        self._wp_browser_btn.setToolTip(
+            "Opens the Chrome window the WordPress automations use. Log in there "
+            "as the automation user (tick 'Remember Me') and leave it open."
+        )
+        self._wp_browser_btn.clicked.connect(self._on_open_wp_browser)
+
         top_row.addWidget(self._cache_status_label)
         top_row.addStretch()
+        top_row.addWidget(self._wp_browser_btn)
         top_row.addWidget(self._cache_btn)
 
         layout.addLayout(top_row)
@@ -384,6 +393,36 @@ class WebsiteTab(QWidget):
     # -----------------------------------------------------------------------
     # Cache clear
     # -----------------------------------------------------------------------
+
+    def _on_open_wp_browser(self):
+        wp_url = cfg.load().get("website", {}).get("wp_admin_url", "")
+        if not wp_url:
+            QMessageBox.warning(
+                self, "Not Configured",
+                "Please configure the WordPress URL in Settings → Website."
+            )
+            return
+        if wp_login.is_browser_open():
+            QMessageBox.information(
+                self, "WordPress Browser",
+                "The WordPress browser is already open. Make sure it's logged in "
+                "and leave it open."
+            )
+            return
+        base = wp_url.rstrip("/")
+        if base.endswith("/wp-admin"):
+            base = base[: -len("/wp-admin")]
+        try:
+            wp_login.open_browser(f"{base}/wp-login.php")
+        except Exception as e:
+            QMessageBox.critical(self, "WordPress Browser", str(e))
+            return
+        QMessageBox.information(
+            self, "WordPress Browser",
+            "Log in there as the automation user (tick 'Remember Me'), "
+            "then leave that window open. The cache clear and update check "
+            "will use it."
+        )
 
     def _on_cache_clicked(self):
         self._cache_results.clear()

@@ -10,6 +10,8 @@ settings.json.*
 *.key
 *.pem
 *.bak
+# WordPress browser profile (holds the automation login cookies)
+wp-browser-profile/
 
 # Python
 __pycache__/

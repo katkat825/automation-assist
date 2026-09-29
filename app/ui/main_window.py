@@ -17,6 +17,7 @@ from .scorm_qa_tab import ScormQaTab
 from .scorm_runtime_tab import ScormRuntimeTab
 from .scheduler_tab import SchedulerTab
 from .od_regression_tab import OdRegressionTab
+from .fulfillment_tab import FulfillmentTab
 
 _DEFAULT_FONT_SIZE = 0  # resolved at runtime from QApplication default
 _MIN_FONT_SIZE = 7
@@ -121,6 +122,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(ScormQaTab(), "SCORM QA")
         tabs.addTab(ScormRuntimeTab(), "SCORM Runtime QA")
         tabs.addTab(OdRegressionTab(), "OD Regress Tests")
+        tabs.addTab(FulfillmentTab(), "Fulfillment")
 
         # Placeholder tabs for future modules
         # (JAWS / screen-reader checks live inside the SCORM QA tab — gated

@@ -1,6 +1,6 @@
 """
 WordPress update checker.
-Logs into WP admin with Playwright, scrapes the Updates page, and returns
+Opens WP admin in the WordPress browser you keep logged in (see wp_login.py), scrapes the Updates page, and returns
 a structured result. Read-only — does not apply any updates.
 """
 
@@ -136,10 +136,8 @@ def check_wp_updates(
     Parameters
     ----------
     wp_admin_url : Base URL of the site or the /wp-admin URL — both work.
-    username     : WordPress admin username or email.
-    password     : WordPress admin password.
-    headless     : Ignored — always runs headed so a person can complete the
-                   Cloudflare check on wp-login.php. Kept for call compatibility.
+    username, password, headless : No longer used — the check runs in the
+                   WordPress browser you keep logged in. Kept for compatibility.
     log          : Optional callback for progress messages.
     """
     def _log(msg: str):
@@ -154,12 +152,9 @@ def check_wp_updates(
 
     try:
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=False)
-            context = browser.new_context()
-            page = context.new_page()
-
-            # --- Login (headed; you may need to click the Cloudflare check) ---
-            wp_login.login(page, base, username, password, _log)
+            # Uses the WordPress browser you keep open and logged in (see
+            # wp_login.py). username/password/headless are no longer used.
+            browser, page = wp_login.open_admin_tab(pw, base, _log)
 
             # --- Navigate to updates page ---
             # force-check=1 tells WordPress to bypass its cached transient and
@@ -175,7 +170,7 @@ def check_wp_updates(
             _parse_plugins(page, result, _log)
             _parse_themes(page, result, _log)
 
-            browser.close()
+            wp_login.close_tab(page)
             _log(
                 f"Done. Core update: {'yes' if result.wp_core_available else 'no'}, "
                 f"Plugins: {len(result.plugin_updates)}, "

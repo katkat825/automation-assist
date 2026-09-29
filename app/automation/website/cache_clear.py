@@ -25,14 +25,9 @@ def clear_wp_cache(
 
     try:
         with sync_playwright() as pw:
-            # Always headed: the Cloudflare check on wp-login.php needs a person
-            # to click it. `headless` is kept for call compatibility but ignored.
-            browser = pw.chromium.launch(headless=False)
-            context = browser.new_context()
-            page = context.new_page()
-
-            # --- LOGIN (headed; you may need to click the Cloudflare check) ---
-            wp_login.login(page, base, username, password, _log)
+            # Uses the WordPress browser you keep open and logged in (see
+            # wp_login.py). username/password/headless are no longer used.
+            browser, page = wp_login.open_admin_tab(pw, base, _log)
 
             # --- ELEMENTOR CACHE ---
             tools_url = f"{base}/wp-admin/admin.php?page=elementor-tools"
@@ -73,7 +68,7 @@ def clear_wp_cache(
 
             _log("Site cache flushed.")
 
-            browser.close()
+            wp_login.close_tab(page)
 
             return {
                 "checked_at": checked_at,
