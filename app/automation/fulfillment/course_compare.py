@@ -95,6 +95,7 @@ class Course:
     name: str          # full name incl. the number, used for sorting
     note: str = ""     # "NEW" / "UPDATED" from the proposal, if any
     source: str = ""   # "Portal" or the PDF file name
+    license_count: Optional[int] = None  # portal only: the license count column
 
 
 @dataclass(frozen=True)
@@ -195,26 +196,32 @@ _PORTAL_ROW_RE = re.compile(r"^(?P<name>.*\S)\s+(?P<id>\d+)\s+(?P<count>\d+)\s+(
 _PLAYER_TYPE_RE = re.compile(r"^[A-Z][a-z]+(?:[A-Z][a-z]*)+$")
 
 
-def _split_portal_row(raw: str) -> tuple[str, str]:
-    """Return (course name, player type) for one pasted row."""
+# A portal license count of 5 means a demo license: if the renewal includes
+# that course it still has to be set up properly, so it counts as a content add.
+DEMO_LICENSE_COUNT = 5
+
+
+def _split_portal_row(raw: str) -> tuple[str, str, Optional[int]]:
+    """Return (course name, player type, license count) for one pasted row."""
     line = clean_text(raw)
     m = _PORTAL_ROW_RE.match(line)
     if m:
-        return clean_text(m.group("name")), m.group("type")
+        return clean_text(m.group("name")), m.group("type"), int(m.group("count"))
     # Fallback: tab-separated with a different column count — first cell is the name.
     cells = [clean_text(c) for c in raw.split("\t") if clean_text(c)]
     if len(cells) > 1:
-        return cells[0], cells[-1] if _PLAYER_TYPE_RE.match(cells[-1]) else ""
-    return line, ""
+        ptype = cells[-1] if _PLAYER_TYPE_RE.match(cells[-1]) else ""
+        return cells[0], ptype, None
+    return line, "", None
 
 
 def parse_portal_list(text: str) -> ParseResult:
     """Parse the pasted Content Licensing table.
 
-    Paste the whole table; ItemCollection rows are skipped entirely and only
-    the course name is kept (the company id,
-    license count and player type columns are dropped). The course number is
-    read from the name.
+    Paste the whole table; ItemCollection rows are skipped entirely. The course
+    number is read from the name; the license count is kept (a count of
+    DEMO_LICENSE_COUNT marks a demo license); company id and player type are
+    dropped.
     """
     result = ParseResult()
     seen: dict[str, Course] = {}
@@ -222,6 +229,7 @@ def parse_portal_list(text: str) -> ParseResult:
     # remember what the last name line produced in case it turns out to be a
     # collection.
     last_added: Optional[tuple[str, object]] = None
+    stray_numbers: list[int] = []   # number cells seen since the last name line
 
     for raw in text.splitlines():
         line = clean_text(raw)
@@ -229,6 +237,15 @@ def parse_portal_list(text: str) -> ParseResult:
             continue
         # Stray cells from a one-cell-per-line copy: bare numbers / player type.
         if line.isdigit() or _PLAYER_TYPE_RE.match(line):
+            if line.isdigit():
+                stray_numbers.append(int(line))
+            elif last_added is not None and last_added[0] == "course" and len(stray_numbers) == 2:
+                # company id, license count, then the player type: fill in the count
+                old = last_added[1]
+                new = replace(old, license_count=stray_numbers[1])
+                result.courses[result.courses.index(old)] = new
+                seen[new.number] = new
+                last_added = ("course", new)
             if line.casefold() == "itemcollection" and last_added is not None:
                 kind, item = last_added
                 if kind == "review":
@@ -240,8 +257,9 @@ def parse_portal_list(text: str) -> ParseResult:
                 last_added = None  # the player type closes the row
             continue
         last_added = None
+        stray_numbers = []
 
-        name, player_type = _split_portal_row(raw)
+        name, player_type, license_count = _split_portal_row(raw)
 
         if player_type.casefold() == "itemcollection":
             continue  # collections aren't courses; never listed anywhere
@@ -260,7 +278,8 @@ def parse_portal_list(text: str) -> ParseResult:
                 f"(also: {seen[number].name})."))
             continue
 
-        course = Course(number=number, name=name, source="Portal")
+        course = Course(number=number, name=name, source="Portal",
+                        license_count=license_count)
         seen[number] = course
         result.courses.append(course)
         last_added = ("course", course)
@@ -632,7 +651,13 @@ def compare(pdf_courses: Iterable[Course], portal_courses: Iterable[Course],
 
     for num, c in pdf_by.items():
         if num in portal_by:
-            reset.append(portal_by[num])
+            portal_c = portal_by[num]
+            if portal_c.license_count == DEMO_LICENSE_COUNT:
+                # Demo license on the portal -> being purchased now = a content add.
+                to_add.append(replace(c, note=", ".join(
+                    x for x in (c.note, f"demo license ({DEMO_LICENSE_COUNT}) on portal") if x)))
+            else:
+                reset.append(portal_c)
         elif is_year_like(num):
             review.append(ReviewItem(c.name, c.source,
                 f"{num} looks like a year. Confirm it's really a course number."))

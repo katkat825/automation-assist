@@ -378,3 +378,35 @@ def test_matching_dates_across_pdfs_agree():
     a = cc.ParseResult(exp_dates=[cc.ExpDate("09/28/2027", "a.pdf", "x")])
     b = cc.ParseResult(exp_dates=[cc.ExpDate("09/28/2027", "b.pdf", "y")])
     assert cc.pick_expiration_date([a, b]).date == "09/28/2027"
+
+
+# ---------------------------------------------------------------------------
+# Demo licenses (portal license count of 5)
+# ---------------------------------------------------------------------------
+
+def test_portal_license_count_is_read():
+    r = cc.parse_portal_list("Slay The Scam 10781 \t1 \t5 \tThirdPartyScorm\n"
+                             "Share With Care 10823 1 350 ThirdPartyScorm")
+    assert [c.license_count for c in r.courses] == [5, 350]
+
+
+def test_portal_license_count_one_cell_per_line():
+    r = cc.parse_portal_list("Slay The Scam 10781\n1\n5\nThirdPartyScorm\n"
+                             "Share With Care 10823\n1\n350\nThirdPartyScorm\n")
+    assert [c.license_count for c in r.courses] == [5, 350]
+
+
+def test_demo_license_on_pdf_counts_as_add_not_reset():
+    portal = cc.parse_portal_list("Slay The Scam 10781\t1\t5\tThirdPartyScorm\n"
+                                  "Share With Care 10823\t1\t350\tThirdPartyScorm").courses
+    pdf = [_c("Slay The Scam 10781"), _c("Share With Care 10823")]
+    r = cc.compare(pdf, portal)
+    assert cc.format_numbers(r.to_add) == "10781"
+    assert "demo" in r.to_add[0].note
+    assert cc.format_numbers(r.archive_reset) == "10823"
+
+
+def test_demo_license_not_on_pdf_is_removed():
+    portal = cc.parse_portal_list("Slay The Scam 10781\t1\t5\tThirdPartyScorm").courses
+    r = cc.compare([], portal)
+    assert cc.format_numbers(r.archive_remove) == "10781"

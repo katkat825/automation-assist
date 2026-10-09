@@ -18,6 +18,7 @@ from .scorm_runtime_tab import ScormRuntimeTab
 from .scheduler_tab import SchedulerTab
 from .od_regression_tab import OdRegressionTab
 from .fulfillment_tab import FulfillmentTab
+from .course_print_tab import CoursePrintTab
 
 _DEFAULT_FONT_SIZE = 0  # resolved at runtime from QApplication default
 _MIN_FONT_SIZE = 7
@@ -121,6 +122,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(WebsiteTab(), "Website")
         tabs.addTab(ScormQaTab(), "SCORM QA")
         tabs.addTab(ScormRuntimeTab(), "SCORM Runtime QA")
+        tabs.addTab(CoursePrintTab(), "Course Print")
         tabs.addTab(OdRegressionTab(), "OD Regress Tests")
         tabs.addTab(FulfillmentTab(), "Fulfillment")
 
