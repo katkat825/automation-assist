@@ -53,7 +53,7 @@ never means reading around a check implementation.
 | **SCORM Runtime QA** | Drives a packaged course in a real browser and verifies tracking. Work in progress (see the Status: SCORM Runtime QA section below) |
 | **Website** | WordPress update check (reports only, never applies), a cache-clear for a known Elementor rendering bug, and a site health smoke test |
 | **OD Regress Tests** | Wraps a Playwright regression suite so it runs from one button (suite not included — see below) |
-| **Fulfillment** | Renewal course list comparison: reads the proposal PDF(s), compares against the pasted portal Content Licensing list, and outputs add / archive & remove / archive & reset course numbers |
+| **Fulfillment** | Order check and renewal course list comparison: reads the SOW and QuickBooks estimate PDFs plus the pasted Order Info email and portal Content Licensing list; flags mismatches (dates, license counts, SKUs, URL, company) and outputs the portal exp date and add / archive & remove / archive & reset course numbers |
 | **Scheduler** | Read-only view of what runs automatically and when |
 
 Accessibility checks run inside SCORM QA rather than as a separate feature. Courses here

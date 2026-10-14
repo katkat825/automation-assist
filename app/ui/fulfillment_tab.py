@@ -1,16 +1,19 @@
 """
-Fulfillment tab — renewal course list comparison.
+Fulfillment tab — order check and renewal course list comparison.
 
 Workflow:
-    1. Add the proposal / order PDF(s) and read them.
+    1. Add the SOW and QuickBooks estimate PDFs and read them.
     2. Check the courses pulled from the PDF (layouts vary, so this list is
        editable: untick, fix a number, or add a row).
-    3. Paste the portal's Content Licensing list.
-    4. Compare → three comma-separated number lists (add / archive & remove /
-       archive & reset), each sorted by full course name, plus a manual-review
-       section for anything that couldn't be placed with confidence.
+    3. Paste the Order Info email and the portal's Content Licensing list.
+    4. Check order → two result sub-tabs:
+       Order    portal exp date, plus warnings wherever the email, SOW,
+                estimate and portal disagree (dates, license counts, SKUs, ...)
+       Courses  three comma-separated number lists (add / archive & remove /
+                archive & reset), each sorted by full course name, plus a
+                manual-review section for anything that couldn't be placed.
 
-Logic lives in app/automation/fulfillment/course_compare.py.
+Logic lives in app/automation/fulfillment/ (course_compare.py, order_check.py).
 """
 
 from __future__ import annotations
@@ -23,11 +26,13 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QFileDialog, QGroupBox, QHBoxLayout,
     QHeaderView, QLabel, QLineEdit, QListWidget, QMessageBox, QPlainTextEdit,
-    QPushButton, QSplitter, QTableWidget, QTableWidgetItem, QTextEdit,
-    QVBoxLayout, QWidget,
+    QPushButton, QSplitter, QTabWidget, QTableWidget, QTableWidgetItem,
+    QTextEdit, QVBoxLayout, QWidget,
 )
 
 from app.automation.fulfillment import course_compare as cc
+from app.automation.fulfillment import order_check as oc
+from .fulfillment_order_view import OrderView
 
 _NUMBER_OK = re.compile(r"^\d{4,5}[A-Z]{0,4}$")
 
@@ -49,6 +54,7 @@ class FulfillmentTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._pdf_review: list[cc.ReviewItem] = []
+        self._pdf_results: list[cc.ParseResult] = []
         self._last_dir = ""
         self.setAcceptDrops(True)
         self._setup_ui()
@@ -63,8 +69,8 @@ class FulfillmentTab(QWidget):
         root.setSpacing(8)
 
         intro = QLabel(
-            "Renewal course list comparison. Compares by course number; "
-            "each list is sorted by course name."
+            "Order check and renewal course list comparison. Courses are compared "
+            "by course number; each list is sorted by course name."
         )
         intro.setStyleSheet("color: #6c757d;")
         root.addWidget(intro)
@@ -89,7 +95,7 @@ class FulfillmentTab(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
 
         # 1. PDFs
-        pdf_group = QGroupBox("1. Proposal / order PDF(s)")
+        pdf_group = QGroupBox("1. SOW and QuickBooks estimate PDFs")
         pg = QVBoxLayout(pdf_group)
         self._pdf_list = QListWidget()
         self._pdf_list.setMaximumHeight(70)
@@ -131,48 +137,39 @@ class FulfillmentTab(QWidget):
         tg.addLayout(row)
         vsplit.addWidget(table_group)
 
-        # 3. Portal list
-        portal_group = QGroupBox("3. Portal content licensing list")
-        ptg = QVBoxLayout(portal_group)
+        # 3. Pasted text: Order Info email + portal list
+        paste_group = QGroupBox("3. Pasted text")
+        ptg = QVBoxLayout(paste_group)
+        self._email = QPlainTextEdit()
+        self._email.setPlaceholderText(
+            "Paste the Order Info email (URL:, Opp Name:, License Dates:, ... in any order)."
+        )
         self._portal = QPlainTextEdit()
         self._portal.setPlaceholderText(
             "Paste the whole Content Licensing table here (Edit Company → Content Licensing).\n"
-            "Only the course names are used; company id, license count and player type are ignored."
+            "Course names are compared; the license count is checked against the SOW."
         )
-        self._portal.setStyleSheet("font-family: Consolas, monospace;")
-        ptg.addWidget(self._portal)
+        paste_tabs = QTabWidget()
+        for box, title in ((self._email, "Order info email"), (self._portal, "Portal content list")):
+            box.setStyleSheet("font-family: Consolas, monospace;")
+            paste_tabs.addTab(box, title)
+        ptg.addWidget(paste_tabs)
         row = QHBoxLayout()
         row.addWidget(self._button("Clear all", self._on_clear_all))
         row.addStretch()
-        self._compare_btn = self._button("▶  Compare", self._on_compare, _BTN_PRIMARY, 32)
-        row.addWidget(self._compare_btn)
+        self._check_btn = self._button("▶  Check order", self._on_check, _BTN_PRIMARY, 32)
+        row.addWidget(self._check_btn)
         ptg.addLayout(row)
-        vsplit.addWidget(portal_group)
+        vsplit.addWidget(paste_group)
 
         layout.addWidget(vsplit, stretch=1)
         return w
 
     def _build_results(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
+        self._order_view = OrderView(self._button)
+        courses = QWidget()
+        layout = QVBoxLayout(courses)
         layout.setContentsMargins(0, 0, 0, 0)
-
-        # Portal expiration date (read with the PDFs; n/a if not in them)
-        exp_group = QGroupBox()
-        eg = QVBoxLayout(exp_group)
-        eg.addWidget(QLabel("<b>Portal exp date</b>"))
-        row = QHBoxLayout()
-        self._exp_field = QLineEdit()
-        self._exp_field.setReadOnly(True)
-        self._exp_field.setStyleSheet("font-family: Consolas, monospace;")
-        row.addWidget(self._exp_field, stretch=1)
-        row.addWidget(self._button("Copy", lambda _=False: self._copy(self._exp_field)))
-        eg.addLayout(row)
-        self._exp_note = QLabel("")
-        self._exp_note.setWordWrap(True)
-        self._exp_note.setStyleSheet("color: #6c757d;")
-        eg.addWidget(self._exp_note)
-        layout.addWidget(exp_group)
 
         self._outputs: dict[str, tuple[QLabel, QLineEdit]] = {}
         for key, title in (
@@ -205,7 +202,11 @@ class FulfillmentTab(QWidget):
         )
         dg.addWidget(self._details)
         layout.addWidget(details_group, stretch=1)
-        return w
+
+        self._result_tabs = QTabWidget()
+        self._result_tabs.addTab(self._order_view, "Order")
+        self._result_tabs.addTab(courses, "Courses")
+        return self._result_tabs
 
     # ------------------------------------------------------------------
     # PDFs
@@ -260,8 +261,9 @@ class FulfillmentTab(QWidget):
             QApplication.restoreOverrideCursor()
 
         merged = cc.merge_results(results)
+        self._pdf_results = results
         self._pdf_review = merged.review
-        self._show_exp_date(cc.pick_expiration_date(results))
+        self._refresh_order()
         self._fill_table(merged.courses)
         self._clear_outputs()
 
@@ -356,23 +358,25 @@ class FulfillmentTab(QWidget):
     # Compare
     # ------------------------------------------------------------------
 
-    def _on_compare(self):
+    def _refresh_order(self, portal: cc.ParseResult | None = None):
+        self._order_view.show_check(
+            oc.check_order(self._email.toPlainText(), self._pdf_results, portal))
+
+    def _on_check(self):
+        portal_text = self._portal.toPlainText()
+        portal = cc.parse_portal_list(portal_text) if portal_text.strip() else None
+        self._refresh_order(portal)
+
+        # Course lists need both sides; the Order sub-tab says what's missing.
         pdf_courses, problems = self._table_courses()
         if problems:
             QMessageBox.warning(self, "Check the PDF course list",
                                 "Fix or untick these rows first:\n\n" + "\n".join(problems))
             return
-        if not pdf_courses:
-            QMessageBox.information(self, "No PDF courses",
-                                    "Read the PDF(s) first, or add the courses by hand.")
-            return
-        portal_text = self._portal.toPlainText()
-        if not portal_text.strip():
-            QMessageBox.information(self, "No portal list",
-                                    "Paste the portal's content licensing list first.")
+        if not pdf_courses or portal is None:
+            self._clear_outputs()
             return
 
-        portal = cc.parse_portal_list(portal_text)
         result = cc.compare(pdf_courses, portal.courses, portal.review + self._pdf_review)
 
         for key, courses in (("add", result.to_add), ("remove", result.archive_remove),
@@ -424,19 +428,6 @@ class FulfillmentTab(QWidget):
     # Misc
     # ------------------------------------------------------------------
 
-    def _show_exp_date(self, r: cc.ExpDateResult):
-        self._exp_field.setText(r.date or "n/a")
-        lines = []
-        if r.date:
-            found = sorted({f"{c.found_as} [{c.source}]" for c in r.candidates})
-            lines.append("From: " + "; ".join(found))
-        elif not r.candidates:
-            lines.append("No license term or expiration date found in the PDF(s).")
-        colour = "#b02a37" if r.notes else "#6c757d"
-        lines.extend(r.notes)
-        self._exp_note.setStyleSheet(f"color: {colour};")
-        self._exp_note.setText("\n".join(lines))
-
     def _copy(self, field: QLineEdit):
         QApplication.clipboard().setText(field.text())
 
@@ -447,10 +438,11 @@ class FulfillmentTab(QWidget):
 
     def _on_clear_all(self):
         self._pdf_list.clear()
+        self._pdf_results = []
         self._pdf_review = []
         self._fill_table([])
+        self._email.clear()
         self._portal.clear()
         self._clear_outputs()
-        self._exp_field.clear()
-        self._exp_note.clear()
+        self._order_view.clear()
         self._details.clear()

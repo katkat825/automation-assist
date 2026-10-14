@@ -344,6 +344,11 @@ def test_exp_date_term_with_to():
     assert dates[0].date == "08/19/2027"
 
 
+def test_exp_date_from_order_email_license_dates():
+    dates, _ = cc.find_expiration_dates("URL: x\nLicense Dates: 10/18/2026-10/17/2027", "Order email")
+    assert [d.date for d in dates] == ["10/17/2027"]
+
+
 def test_estimate_prefers_renewal_period_over_expiration_date():
     text = "DATE 07/09/2026\nEXPIRATION DATE 09/30/2027\nRenewal PD: 9/29/2026-9/28/2027"
     dates, _ = cc.find_expiration_dates(text, "e.pdf")

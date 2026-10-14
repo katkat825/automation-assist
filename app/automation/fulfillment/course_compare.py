@@ -125,6 +125,11 @@ class ParseResult:
     review: list[ReviewItem] = field(default_factory=list)
     exp_dates: list[ExpDate] = field(default_factory=list)
     multi_year_notes: list[str] = field(default_factory=list)
+    # Raw PDF content, kept so order_check can read the rest of the document
+    # without opening it again. Empty for pasted text.
+    source: str = ""
+    text: str = ""
+    tables: list[list[list[str]]] = field(default_factory=list)  # table -> row -> cell
 
 
 @dataclass
@@ -524,9 +529,10 @@ def extract_courses_from_words(pages: list[list[dict]], source: str) -> ParseRes
 
 _DATE = r"\d{1,2}\s*[/-]\s*\d{1,2}\s*[/-]\s*\d{2,4}"
 # "License Term: 9/29/2026-9/28/2027", "License Term: 8/20/2026 to 8/19/2027",
-# "Renewal PD: 9/29/2026-9/28/2027" -> the END of the term.
+# "Renewal PD: 9/29/2026-9/28/2027", "License Dates: 10/18/2026-10/17/2027"
+# (Order Info email) -> the END of the term.
 _TERM_RE = re.compile(
-    rf"(?:License\s+Term|Renewal\s+PD|License\s+Period|Term\s+Dates?)\s*:?\s*"
+    rf"(?:License\s+Term|License\s+Dates?|Renewal\s+PD|License\s+Period|Term\s+Dates?)\s*:?\s*"
     rf"({_DATE})\s*(?:-|–|—|to|through|thru)\s*({_DATE})",
     re.IGNORECASE,
 )
@@ -605,12 +611,18 @@ def extract_pdf_courses(path: str | Path) -> ParseResult:
     path = Path(path)
     pages: list[list[dict]] = []
     texts: list[str] = []
+    tables: list[list[list[str]]] = []
     with pdfplumber.open(str(path)) as pdf:
         for page in pdf.pages:
             pages.append(page.extract_words())
             texts.append(page.extract_text() or "")
+            for table in page.extract_tables():
+                tables.append([[clean_text(cell or "") for cell in row] for row in table])
     result = extract_courses_from_words(pages, path.name)
     result.exp_dates, result.multi_year_notes = find_expiration_dates("\n".join(texts), path.name)
+    result.source = path.name
+    result.text = clean_text_keep_lines("\n".join(texts))
+    result.tables = tables
     return result
 
 

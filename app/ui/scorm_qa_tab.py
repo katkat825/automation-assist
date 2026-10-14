@@ -591,6 +591,12 @@ class _SearchWidget(QWidget):
         self._input.setPlaceholderText("Type a word or phrase and press Search…")
         self._input.returnPressed.connect(self._do_search)
         search_row.addWidget(self._input)
+        self._whole_word_chk = QCheckBox("Whole word")
+        self._whole_word_chk.setToolTip(
+            'Off: partial match ("mail" finds "email").\n'
+            'On: whole word only ("ai" won\'t find "email").'
+        )
+        search_row.addWidget(self._whole_word_chk)
         search_btn = QPushButton("Search")
         search_btn.setFixedWidth(80)
         search_btn.clicked.connect(self._do_search)
@@ -615,7 +621,9 @@ class _SearchWidget(QWidget):
         if not query:
             self._results.setPlainText("Enter a search term.")
             return
-        sec = global_search(self._scorm_data, query)
+        sec = global_search(
+            self._scorm_data, query, whole_word=self._whole_word_chk.isChecked()
+        )
         self._results.setPlainText(_section_to_text(sec))
 
 

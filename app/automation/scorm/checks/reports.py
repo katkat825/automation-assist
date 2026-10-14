@@ -17,14 +17,25 @@ from .models import Section, _screen_num
 # 10. Global text search (called on demand from UI)
 # ---------------------------------------------------------------------------
 
-def global_search(data: ScormData, query: str) -> Section:
-    sec = Section(f'Search Results: "{query}"')
+def global_search(data: ScormData, query: str, whole_word: bool = False) -> Section:
+    """Case-insensitive literal search across all slide text.
+
+    whole_word=False matches anywhere ("mail" hits "email"); True requires the
+    term not be flanked by word characters ("ai" won't hit "email"). Lookarounds
+    are used instead of \\b so terms with leading/trailing punctuation ("$5.00")
+    still match.
+    """
+    mode = " (whole word)" if whole_word else ""
+    sec = Section(f'Search Results: "{query}"{mode}')
 
     if not query.strip():
         sec.add("info", "Enter a search term above and click Search")
         return sec
 
-    pattern = re.compile(re.escape(query.strip()), re.IGNORECASE)
+    escaped = re.escape(query.strip())
+    if whole_word:
+        escaped = rf"(?<!\w){escaped}(?!\w)"
+    pattern = re.compile(escaped, re.IGNORECASE)
     hit_count = 0
 
     for slide in data.slides:

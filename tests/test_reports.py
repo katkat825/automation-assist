@@ -66,6 +66,31 @@ def test_search_treats_the_query_literally():
     assert "1 match(es) found" in "\n".join(messages(global_search(data, "$5.00")))
 
 
+def test_partial_match_is_the_default():
+    data = make_data([make_slide(texts=["Check your email."])])
+    assert "1 match(es) found" in "\n".join(messages(global_search(data, "mail")))
+
+
+def test_whole_word_skips_matches_inside_words():
+    data = make_data([make_slide(texts=["Check your email."])])
+    result = messages(global_search(data, "ai", whole_word=True))
+    assert any("No results found" in m for m in result)
+
+
+def test_whole_word_finds_standalone_words():
+    data = make_data([make_slide(texts=["Using AI responsibly."])])
+    assert "1 match(es) found" in "\n".join(
+        messages(global_search(data, "ai", whole_word=True))
+    )
+
+
+def test_whole_word_handles_punctuated_terms():
+    data = make_data([make_slide(texts=["costs $5.00 (approx)"])])
+    assert "1 match(es) found" in "\n".join(
+        messages(global_search(data, "$5.00", whole_word=True))
+    )
+
+
 def test_search_includes_the_screen_number():
     data = make_data([make_slide(scene_number=4, slide_number=2, texts=["findme"])])
     assert any("[4.2]" in m for m in messages(global_search(data, "findme")))
