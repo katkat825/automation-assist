@@ -32,14 +32,6 @@ _DEFAULTS = {
     "ui": {
         "font_size": 0,  # 0 = system default; positive = pt override
     },
-    "regression": {
-        # Full path to the Playwright project. That project lives in a separate
-        # private repo and is not shipped here. Empty = look for od_regress_tests/
-        # beside the repo root, or beside the .exe when frozen.
-        "project_dir": "",
-        # Optional external run-log spreadsheet opened after a run. Empty = skip.
-        "run_log_url": "",
-    },
 }
 
 

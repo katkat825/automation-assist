@@ -23,9 +23,5 @@
   },
   "ui": {
     "font_size": 0
-  },
-  "regression": {
-    "project_dir": "",
-    "run_log_url": ""
   }
 }

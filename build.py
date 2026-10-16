@@ -12,14 +12,6 @@ Notes:
       %LOCALAPPDATA%/AutomationAssist/ at runtime.
     - Playwright browsers must be installed on the machine
       (run `playwright install chromium` once).
-    - The Playwright regression project (od_regress_tests/) is kept in a
-      separate private repo and is not part of this repository. It is also
-      never bundled into the .exe: it needs node_modules on disk and
-      Playwright writes playwright-report/ back into it, so it cannot live
-      in the read-only temp dir PyInstaller extracts to. The app looks for it
-      next to the .exe and one level up (so running from dist/ finds a copy
-      in the repo root); otherwise set regression.project_dir in Settings.
-      If you move the .exe elsewhere, move that folder with it.
 """
 
 import os

@@ -11,7 +11,7 @@ from app.config import settings as cfg
 
 
 def test_defaults_expose_the_expected_sections():
-    assert set(cfg._DEFAULTS) == {"sql", "qa", "website", "ui", "regression"}
+    assert set(cfg._DEFAULTS) == {"sql", "qa", "website", "ui"}
 
 
 def test_defaults_contain_no_baked_in_credentials():
@@ -72,7 +72,7 @@ def test_keys_absent_from_a_saved_file_still_appear(tmp_path, monkeypatch_paths)
     path.write_text(json.dumps({"website": {"live_url": "https://saved.example.com"}}))
     monkeypatch_paths(path)
     loaded = cfg.load()
-    assert "regression" in loaded
+    assert "qa" in loaded
     assert loaded["website"]["wp_username"] == ""
 
 

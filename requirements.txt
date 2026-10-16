@@ -1,12 +1,13 @@
 # Runtime
 PySide6>=6.7.0            # Qt UI
-playwright>=1.44.0        # browser automation (WordPress, SCORM runtime, regression)
+playwright>=1.44.0        # browser automation (WordPress, SCORM runtime)
 requests>=2.31.0          # site health checks
 beautifulsoup4>=4.12.0    # HTML parsing for site health checks
 pyspellchecker>=0.8.1     # spelling / acronym checks
 pdfplumber>=0.11.0        # reading renewal proposal PDFs (Fulfillment tab)
 python-docx>=1.1.0        # reading course prints (Course Print tab)
 python-pptx>=1.0.0        # course print -> PowerPoint (Course Print tab)
+openpyxl>=3.1.0           # reading/writing report workbooks (Data Analysis tab)
 
 # Test
 pytest>=8.0

@@ -16,9 +16,9 @@ from .website_tab import WebsiteTab
 from .scorm_qa_tab import ScormQaTab
 from .scorm_runtime_tab import ScormRuntimeTab
 from .scheduler_tab import SchedulerTab
-from .od_regression_tab import OdRegressionTab
 from .fulfillment_tab import FulfillmentTab
 from .course_print_tab import CoursePrintTab
+from .data_analysis_tab import DataAnalysisTab
 
 _DEFAULT_FONT_SIZE = 0  # resolved at runtime from QApplication default
 _MIN_FONT_SIZE = 7
@@ -123,13 +123,11 @@ class MainWindow(QMainWindow):
         tabs.addTab(ScormQaTab(), "SCORM QA")
         tabs.addTab(ScormRuntimeTab(), "SCORM Runtime QA")
         tabs.addTab(CoursePrintTab(), "Course Print")
-        tabs.addTab(OdRegressionTab(), "OD Regress Tests")
         tabs.addTab(FulfillmentTab(), "Fulfillment")
+        tabs.addTab(DataAnalysisTab(), "Data Analysis")
 
-        # Placeholder tabs for future modules
         # (JAWS / screen-reader checks live inside the SCORM QA tab — gated
         # on the Dual-path checkbox — so there is no separate JAWS tab.)
-        tabs.addTab(self._placeholder("SQL Queries", "SQL query runner — coming soon"), "SQL Queries")
         tabs.addTab(SchedulerTab(), "Scheduler")
 
         self.setCentralWidget(tabs)

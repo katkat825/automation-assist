@@ -1,7 +1,7 @@
 # Automation Assist
 
 A desktop tool that automates the QA and maintenance work I do most often. This primarily includes
-static analysis of SCORM e-learning packages, plus WordPress upkeep and regression runs.
+static analysis of SCORM e-learning packages, plus WordPress upkeep.
 
 Built for my own daily use. Published so it can be read, not reused.
 
@@ -52,24 +52,13 @@ never means reading around a check implementation.
 | **SCORM QA** | Static analysis of a course package: structure, SCORM API wiring, terminology, duplicates, spelling/spacing, questions, screen inventory, generated manual checklist |
 | **SCORM Runtime QA** | Drives a packaged course in a real browser and verifies tracking. Work in progress (see the Status: SCORM Runtime QA section below) |
 | **Website** | WordPress update check (reports only, never applies), a cache-clear for a known Elementor rendering bug, and a site health smoke test |
-| **OD Regress Tests** | Wraps a Playwright regression suite so it runs from one button (suite not included — see below) |
 | **Fulfillment** | Order check and renewal course list comparison: reads the SOW and QuickBooks estimate PDFs plus the pasted Order Info email and portal Content Licensing list; flags mismatches (dates, license counts, SKUs, URL, company) and outputs the portal exp date and add / archive & remove / archive & reset course numbers |
+| **Data Analysis** | Report sorting and summaries, one sub-tab per report. **MS Attack Sim**: sorts the Defender Attack Simulation results export fail-first into Pass / forwards / Fail / Delivery Failed sheets plus a forwards .csv for review (phase 1), then applies the forward review, splits failures into Fail x N streaks from the previous simulation, and produces the results email summary (phase 2) |
 | **Scheduler** | Read-only view of what runs automatically and when |
 
 Accessibility checks run inside SCORM QA rather than as a separate feature. Courses here
 ship both a rich-media and a screen-reader-friendly path in one package, so the
 accessibility checks only apply when a course is marked dual-path.
-
-### Not included in this repository
-
-The Playwright regression suite the **OD Regress Tests** tab drives is kept private. The
-specs encode how an internal LMS behaves — certificate rules, scoring thresholds, reporting
-filters — which isn't mine to publish.
-
-What's here is the runner: the tab, the subprocess handling, and the folder resolution in
-`app/automation/regression/runner.py`. It expects a Playwright project at `od_regress_tests/`,
-or wherever `regression.project_dir` points. Without one, that tab reports the folder is
-missing and the rest of the app is unaffected.
 
 ---
 
