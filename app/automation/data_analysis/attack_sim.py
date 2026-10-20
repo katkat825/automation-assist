@@ -21,8 +21,9 @@ Phase 1  raw results .csv  ->  "<Mon YYYY> <Ev|Sp> Phish Results.xlsx"
 
 Phase 2  phase-1 workbook + forward review results + previous final workbook
          -> the same workbook, finished:
-             forwarded to the approved mailbox  -> Pass - Report
-             forwarded anywhere else             -> Fail
+             forwarded to the approved mailbox  -> Pass - Report  ("forward to spam")
+             forwarded anywhere else             -> Fail           ("forward to not spam")
+         (the quoted note goes in the 3rd column, Compromised, of each moved row)
          then the Fail sheet is split by consecutive-failure streak using the
          previous simulation's final workbook:
              prev Fail x N           -> Fail x N+1
@@ -68,6 +69,12 @@ COL_REPORTED = "Phishing Reported On"
 COL_DELETED = "MessageDeleted_TimeStamp"
 
 FORWARDS_CSV_COLUMNS = [COL_NAME, COL_MAIL, COL_FORWARDED, COL_REPORTED]
+
+# Phase 2 writes this into the 3rd column (Compromised) of each forwarded user
+# it moves, so the finished workbook shows how the forward was judged.
+FORWARD_NOTE_COL = 2
+FORWARD_TO_SPAM = "forward to spam"           # -> Pass - Report
+FORWARD_TO_NOT_SPAM = "forward to not spam"   # -> Fail
 
 # *_TimeStamp columns that are a user acting on the payload -> Fail.
 _FAIL_PREFIXES = ("EmailLinkClicked", "AttachmentOpened", "CredSupplied")
@@ -745,7 +752,10 @@ def finish_workbook(phase1_xlsx: str | Path, decisions: list[bool],
                          f"({len(fwd.rows)} on the forwards sheet).")
     for row, ok in zip(fwd.rows, decisions):
         target = SHEET_REPORT if ok else SHEET_FAIL
-        sheets[target].rows.append(_reorder(row, fwd, sheets[target]))
+        moved = list(_reorder(row, fwd, sheets[target]))
+        moved += [None] * (FORWARD_NOTE_COL + 1 - len(moved))
+        moved[FORWARD_NOTE_COL] = FORWARD_TO_SPAM if ok else FORWARD_TO_NOT_SPAM
+        sheets[target].rows.append(moved)
         if ok:
             moved_r += 1
         else:

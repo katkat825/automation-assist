@@ -9,6 +9,9 @@ Input
       around them.
     - SKU-style: "CL-9282-CG - Excel 2019 Level 1 Basic" rows in the pricing
       table.
+    - SKU-only: a pricing table row whose SKU cell is just "CL-11570" and
+      whose description is free text ("... upgrade from the 2021 OWASP
+      bundle to the new OWASP Top 10 11570 course.").
   Both are read from word positions (pdfplumber), not from plain text, so
   the two columns don't get interleaved.
 * The portal's Content Licensing list, copied and pasted as-is (tab-separated:
@@ -21,7 +24,8 @@ portal ("&" vs "and", capitalisation, etc.), numbers don't.
 
 * to_add          on the PDF, not on the portal
 * archive_remove  on the portal, not on the PDF
-* archive_reset   on both
+* archive_reset   on both, plus portal-only courses the user chose to keep
+                  (a change order that only lists what's changing)
 * review          anything that could not be placed with confidence (portal
                   items with no number, year-like
                   numbers, lines in the PDF
@@ -619,11 +623,53 @@ def extract_pdf_courses(path: str | Path) -> ParseResult:
             for table in page.extract_tables():
                 tables.append([[clean_text(cell or "") for cell in row] for row in table])
     result = extract_courses_from_words(pages, path.name)
+    add_sku_table_courses(result, tables, path.name)
     result.exp_dates, result.multi_year_notes = find_expiration_dates("\n".join(texts), path.name)
     result.source = path.name
     result.text = clean_text_keep_lines("\n".join(texts))
     result.tables = tables
     return result
+
+
+# A pricing-table SKU cell that is only a course licence: "CL-11570", "CL-11569P".
+_SKU_CELL_RE = re.compile(rf"^CL-({_NUM})$", re.IGNORECASE)
+
+
+def add_sku_table_courses(result: ParseResult, tables: Iterable[list[list[str]]],
+                          source: str) -> None:
+    """Courses named only by a "CL-<number>" SKU cell in a pricing table.
+
+    The description next to it is free text, so the word reader can't pick the
+    number out of it; the SKU cell itself is unambiguous.
+    """
+    found = {c.number for c in result.courses}
+    for table in tables:
+        header = [clean_text(h) for h in (table[0] if table else [])]
+        sku_col = next((i for i, h in enumerate(header) if re.fullmatch(r"SKU", h, re.I)), None)
+        if sku_col is None:
+            continue
+        desc_col = next((i for i, h in enumerate(header) if re.search(r"Description", h, re.I)), None)
+        for row in table[1:]:
+            m = _SKU_CELL_RE.match(clean_text(row[sku_col]) if sku_col < len(row) else "")
+            if not m:
+                continue
+            number = m.group(1).upper()
+            if number in found:
+                continue
+            desc = clean_text(row[desc_col]) if desc_col is not None and desc_col < len(row) else ""
+            found.add(number)
+            result.courses.append(Course(number=number, name=f"{desc or 'SKU CL-' + number} {number}",
+                                         note="from SKU", source=source))
+    result.courses = _sort_by_name(result.courses)
+    # The free-text description usually lands in review; drop it once its
+    # numbers are all accounted for.
+    kept = []
+    for r in result.review:
+        nums = {n.upper() for n in _ANY_NUM_RE.findall(r.text) if not is_year_like(n)}
+        if nums and nums <= found:
+            continue
+        kept.append(r)
+    result.review = kept
 
 
 def merge_results(results: Iterable[ParseResult]) -> ParseResult:
@@ -654,7 +700,10 @@ def _name_key(name: str) -> str:
 
 
 def compare(pdf_courses: Iterable[Course], portal_courses: Iterable[Course],
-            review: Iterable[ReviewItem] = ()) -> Comparison:
+            review: Iterable[ReviewItem] = (), keep: Iterable[str] = ()) -> Comparison:
+    """``keep``: numbers of portal-only courses to archive and reset instead of
+    archive and remove (chosen by hand when the PDF only lists what's changing)."""
+    keep = set(keep)
     pdf_by = {c.number: c for c in pdf_courses}
     portal_by = {c.number: c for c in portal_courses}
     review = list(review)
@@ -679,7 +728,7 @@ def compare(pdf_courses: Iterable[Course], portal_courses: Iterable[Course],
     for num, c in portal_by.items():
         if num in pdf_by:
             continue
-        remove.append(c)
+        (reset if num in keep else remove).append(c)
 
     replacements = []
     for a in to_add:

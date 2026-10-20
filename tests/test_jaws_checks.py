@@ -179,6 +179,13 @@ def test_normalise_title_handles_none_and_empty():
     assert jaws_checks._normalise_title(None) == ""
 
 
+def test_counter_re_matches_literal_and_variable_counters():
+    """Regression: 'Screen 5 of %_player.a%' was picked as the on-screen title."""
+    for text in ("Screen 3 of 66", "Screen 5 of %_player.a%", "Question %q% of %total%"):
+        assert jaws_checks._COUNTER_RE.match(text)
+    assert not jaws_checks._COUNTER_RE.match("A01: Broken Access Control: Defined")
+
+
 # --- section wiring -------------------------------------------------------
 
 def test_run_jaws_checks_returns_sections():

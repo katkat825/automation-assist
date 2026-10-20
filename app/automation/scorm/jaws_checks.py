@@ -359,9 +359,11 @@ _PLACEHOLDER_TITLE_RE = re.compile(
 
 # Progress / counter labels that appear at the top of slides but are not
 # titles — e.g. "Screen 3 of 66", "Question 1 of 4", "Page 2 of 10",
-# "Slide 5 of 12", "Step 1 of 3".
+# "Slide 5 of 12", "Step 1 of 3".  Either number may be a Storyline
+# variable reference instead of a literal, e.g. "Screen 5 of %_player.a%".
+_COUNTER_NUM = r"(?:\d+|%[^%\s]+%)"
 _COUNTER_RE = re.compile(
-    r"^\s*(screen|question|page|slide|step)\s+\d+\s+of\s+\d+\s*$",
+    rf"^\s*(screen|question|page|slide|step)\s+{_COUNTER_NUM}\s+of\s+{_COUNTER_NUM}\s*$",
     re.IGNORECASE,
 )
 

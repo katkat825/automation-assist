@@ -1,19 +1,24 @@
 """
-Fulfillment tab — order check and renewal course list comparison.
+Fulfillment tab — order check and renewal course list comparison, as a
+step-by-step wizard (Back / Next, or click a step you've already reached):
 
-Workflow:
-    1. Add the SOW and QuickBooks estimate PDFs and read them.
-    2. Check the courses pulled from the PDF (layouts vary, so this list is
-       editable: untick, fix a number, or add a row).
-    3. Paste the Order Info email and the portal's Content Licensing list.
-    4. Check order → two result sub-tabs:
-       Order    portal exp date, plus warnings wherever the email, SOW,
-                estimate and portal disagree (dates, license counts, SKUs, ...)
-       Courses  three comma-separated number lists (add / archive & remove /
-                archive & reset), each sorted by full course name, plus a
-                manual-review section for anything that couldn't be placed.
+    1. PDFs      Add the SOW and QuickBooks estimate PDFs. Next reads them.
+    2. Courses   Check the courses pulled from the PDF (layouts vary, so this
+                 list is editable: untick, fix a number, or add a row). The
+                 PDF's upgrade / Course Archive text is shown above it.
+    3. Paste     The Order Info email and the portal's Content Licensing list.
+    4. Removals  Portal courses that aren't on the PDF, with the PDF's text
+                 about what's being removed above them. Ticked = archive and
+                 remove, unticked = archive and reset. A PDF that only lists
+                 what's changing (an upgrade) starts with nothing ticked.
+    5. Results   Order   portal exp date, plus warnings wherever the email,
+                         SOW, estimate and portal disagree
+                 Courses three comma-separated number lists (add / archive &
+                         remove / archive & reset), each sorted by full course
+                         name, plus a manual-review section.
 
-Logic lives in app/automation/fulfillment/ (course_compare.py, order_check.py).
+Logic lives in app/automation/fulfillment/ (course_compare.py, order_check.py,
+removals.py).
 """
 
 from __future__ import annotations
@@ -23,20 +28,29 @@ import re
 from pathlib import Path
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QFileDialog, QGroupBox, QHBoxLayout,
     QHeaderView, QLabel, QLineEdit, QListWidget, QMessageBox, QPlainTextEdit,
-    QPushButton, QSplitter, QTabWidget, QTableWidget, QTableWidgetItem,
-    QTextEdit, QVBoxLayout, QWidget,
+    QPushButton, QSplitter, QStackedWidget, QTabWidget, QTableWidget,
+    QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from app.automation.fulfillment import course_compare as cc
 from app.automation.fulfillment import order_check as oc
+from app.automation.fulfillment import removals as rm
 from .fulfillment_order_view import OrderView
 
 _NUMBER_OK = re.compile(r"^\d{4,5}[A-Z]{0,4}$")
 
 _COL_USE, _COL_NUM, _COL_NAME, _COL_NOTE = range(4)
+# Removals table: tick = archive and remove; the last column says why a row is suggested.
+_RCOL_REMOVE, _RCOL_NUM, _RCOL_NAME, _RCOL_WHY = range(4)
+
+_STEPS = ("PDFs", "Courses on PDF", "Paste", "Removals", "Results")
+_PDFS, _COURSES, _PASTE, _REMOVALS, _RESULTS = range(5)
+
+_SUGGESTED_BG = QColor("#fff3cd")
 
 _BTN = (
     "QPushButton { background: #6c757d; color: white; border-radius: 4px; padding: 0 12px; }"
@@ -48,6 +62,11 @@ _BTN_PRIMARY = (
     "QPushButton:hover { background: #157347; }"
     "QPushButton:disabled { background: #6c757d; }"
 )
+_STEP_BTN = (
+    "QPushButton { border: none; padding: 4px 8px; color: #adb5bd; background: transparent; }"
+    "QPushButton:enabled { color: #495057; }"
+    "QPushButton:checked { color: #198754; font-weight: bold; border-bottom: 2px solid #198754; }"
+)
 
 
 class FulfillmentTab(QWidget):
@@ -55,6 +74,12 @@ class FulfillmentTab(QWidget):
         super().__init__(parent)
         self._pdf_review: list[cc.ReviewItem] = []
         self._pdf_results: list[cc.ParseResult] = []
+        self._pdf_errors: list[str] = []
+        self._notes: list[rm.ChangeNote] = []
+        self._portal_result: cc.ParseResult | None = None
+        self._plan: rm.RemovalPlan | None = None
+        self._plan_key = None   # inputs the removals table was built from
+        self._reached = _PDFS   # furthest step reached; earlier steps are clickable
         self._last_dir = ""
         self.setAcceptDrops(True)
         self._setup_ui()
@@ -75,12 +100,39 @@ class FulfillmentTab(QWidget):
         intro.setStyleSheet("color: #6c757d;")
         root.addWidget(intro)
 
-        split = QSplitter(Qt.Orientation.Horizontal)
-        split.addWidget(self._build_inputs())
-        split.addWidget(self._build_results())
-        split.setStretchFactor(0, 3)
-        split.setStretchFactor(1, 2)
-        root.addWidget(split, stretch=1)
+        steps = QHBoxLayout()
+        steps.setSpacing(2)
+        self._step_btns: list[QPushButton] = []
+        for i, name in enumerate(_STEPS):
+            if i:
+                sep = QLabel("›")
+                sep.setStyleSheet("color: #adb5bd;")
+                steps.addWidget(sep)
+            b = QPushButton(f"{i + 1}. {name}")
+            b.setCheckable(True)
+            b.setStyleSheet(_STEP_BTN)
+            b.clicked.connect(lambda _=False, i=i: self._go_to(i))
+            steps.addWidget(b)
+            self._step_btns.append(b)
+        steps.addStretch()
+        root.addLayout(steps)
+
+        self._stack = QStackedWidget()
+        for page in (self._build_pdf_page(), self._build_courses_page(), self._build_paste_page(),
+                     self._build_removals_page(), self._build_results()):
+            self._stack.addWidget(page)
+        root.addWidget(self._stack, stretch=1)
+
+        nav = QHBoxLayout()
+        self._back_btn = self._button("‹  Back", self._on_back)
+        nav.addWidget(self._back_btn)
+        nav.addWidget(self._button("Clear all", self._on_clear_all))
+        nav.addStretch()
+        self._next_btn = self._button("Next  ›", self._on_next, _BTN_PRIMARY, 32)
+        self._next_btn.setMinimumWidth(150)
+        nav.addWidget(self._next_btn)
+        root.addLayout(nav)
+        self._show_step(_PDFS)
 
     def _button(self, text, slot, style=_BTN, height=28) -> QPushButton:
         b = QPushButton(text)
@@ -89,32 +141,34 @@ class FulfillmentTab(QWidget):
         b.clicked.connect(slot)
         return b
 
-    def _build_inputs(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        # 1. PDFs
-        pdf_group = QGroupBox("1. SOW and QuickBooks estimate PDFs")
+    def _build_pdf_page(self) -> QWidget:
+        pdf_group = QGroupBox("SOW and QuickBooks estimate PDFs")
         pg = QVBoxLayout(pdf_group)
+        hint = QLabel("Drag PDFs onto this tab, or use Add PDF…. Next reads them.")
+        hint.setStyleSheet("color: #6c757d;")
+        pg.addWidget(hint)
         self._pdf_list = QListWidget()
-        self._pdf_list.setMaximumHeight(70)
         self._pdf_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._pdf_list.setToolTip("Drag PDFs onto this tab, or use Add PDF…")
-        pg.addWidget(self._pdf_list)
+        pg.addWidget(self._pdf_list, stretch=1)
         row = QHBoxLayout()
         row.addWidget(self._button("Add PDF…", self._on_add_pdfs))
         row.addWidget(self._button("Remove", self._on_remove_pdfs))
         row.addStretch()
-        self._read_btn = self._button("Read PDFs", self._on_read_pdfs, _BTN_PRIMARY)
-        row.addWidget(self._read_btn)
         pg.addLayout(row)
-        layout.addWidget(pdf_group)
+        return pdf_group
 
+    def _build_courses_page(self) -> QWidget:
         vsplit = QSplitter(Qt.Orientation.Vertical)
 
-        # 2. Courses read from the PDF
-        table_group = QGroupBox("2. Courses on the PDF (check before comparing)")
+        notes_group = QGroupBox("From the PDF: upgrades, course archive, lines to check")
+        ng = QVBoxLayout(notes_group)
+        self._pdf_notes = QTextEdit()
+        self._pdf_notes.setReadOnly(True)
+        ng.addWidget(self._pdf_notes)
+        vsplit.addWidget(notes_group)
+
+        table_group = QGroupBox("Courses on the PDF (check before comparing)")
         tg = QVBoxLayout(table_group)
         self._table = QTableWidget(0, 4)
         self._table.setHorizontalHeaderLabels(["Use", "Number", "Course name", "Note"])
@@ -136,9 +190,12 @@ class FulfillmentTab(QWidget):
         row.addWidget(self._button("Remove selected", self._on_remove_rows))
         tg.addLayout(row)
         vsplit.addWidget(table_group)
+        vsplit.setStretchFactor(0, 1)
+        vsplit.setStretchFactor(1, 3)
+        return vsplit
 
-        # 3. Pasted text: Order Info email + portal list
-        paste_group = QGroupBox("3. Pasted text")
+    def _build_paste_page(self) -> QWidget:
+        paste_group = QGroupBox("Pasted text")
         ptg = QVBoxLayout(paste_group)
         self._email = QPlainTextEdit()
         self._email.setPlaceholderText(
@@ -154,16 +211,53 @@ class FulfillmentTab(QWidget):
             box.setStyleSheet("font-family: Consolas, monospace;")
             paste_tabs.addTab(box, title)
         ptg.addWidget(paste_tabs)
-        row = QHBoxLayout()
-        row.addWidget(self._button("Clear all", self._on_clear_all))
-        row.addStretch()
-        self._check_btn = self._button("▶  Check order", self._on_check, _BTN_PRIMARY, 32)
-        row.addWidget(self._check_btn)
-        ptg.addLayout(row)
-        vsplit.addWidget(paste_group)
+        return paste_group
 
-        layout.addWidget(vsplit, stretch=1)
-        return w
+    def _build_removals_page(self) -> QWidget:
+        vsplit = QSplitter(Qt.Orientation.Vertical)
+
+        top = QGroupBox("What the PDF says is being removed or replaced")
+        topl = QVBoxLayout(top)
+        self._removal_mode = QLabel("")
+        self._removal_mode.setWordWrap(True)
+        topl.addWidget(self._removal_mode)
+        self._removal_text = QTextEdit()
+        self._removal_text.setReadOnly(True)
+        topl.addWidget(self._removal_text)
+        vsplit.addWidget(top)
+
+        table_group = QGroupBox("On the portal but not on the PDF. Ticked = archive and remove; "
+                                "unticked = archive and reset")
+        tg = QVBoxLayout(table_group)
+        self._rtable = QTableWidget(0, 4)
+        self._rtable.setHorizontalHeaderLabels(["Remove", "Number", "Course name", "Matches PDF text"])
+        hdr = self._rtable.horizontalHeader()
+        hdr.setSectionResizeMode(_RCOL_REMOVE, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(_RCOL_NUM, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(_RCOL_NAME, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(_RCOL_WHY, QHeaderView.ResizeMode.ResizeToContents)
+        self._rtable.verticalHeader().setVisible(False)
+        self._rtable.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._rtable.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._rtable.itemChanged.connect(lambda _item: self._update_removal_count())
+        tg.addWidget(self._rtable)
+        row = QHBoxLayout()
+        self._removal_count = QLabel("")
+        self._removal_count.setStyleSheet("color: #6c757d;")
+        row.addWidget(self._removal_count)
+        row.addStretch()
+        row.addWidget(self._button("Select all", lambda: self._tick_removals(lambda n: True)))
+        row.addWidget(self._button("Select none", lambda: self._tick_removals(lambda n: False)))
+        self._tick_suggested_btn = self._button(
+            "Tick highlighted",
+            lambda: self._tick_removals(lambda n: n in self._plan.suggested, keep_others=True))
+        self._tick_suggested_btn.setToolTip("Tick the rows whose names match the PDF's text")
+        row.addWidget(self._tick_suggested_btn)
+        tg.addLayout(row)
+        vsplit.addWidget(table_group)
+        vsplit.setStretchFactor(0, 1)
+        vsplit.setStretchFactor(1, 3)
+        return vsplit
 
     def _build_results(self) -> QWidget:
         self._order_view = OrderView(self._button)
@@ -242,12 +336,12 @@ class FulfillmentTab(QWidget):
     def dropEvent(self, event):
         self._add_pdf_paths(u.toLocalFile() for u in event.mimeData().urls())
 
-    def _on_read_pdfs(self):
+    def _on_read_pdfs(self) -> bool:
         paths = [self._pdf_list.item(i).data(Qt.ItemDataRole.UserRole)
                  for i in range(self._pdf_list.count())]
         if not paths:
             QMessageBox.information(self, "No PDFs", "Add at least one proposal PDF first.")
-            return
+            return False
 
         results, errors = [], []
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -262,21 +356,38 @@ class FulfillmentTab(QWidget):
 
         merged = cc.merge_results(results)
         self._pdf_results = results
+        self._pdf_errors = errors
         self._pdf_review = merged.review
-        self._refresh_order()
+        self._notes = rm.change_notes(results)
         self._fill_table(merged.courses)
         self._clear_outputs()
+        self._details.clear()
+        self._pdf_notes.setHtml(self._pdf_notes_html(not merged.courses))
+        return True
 
+    def _pdf_notes_html(self, no_courses: bool) -> str:
         lines = []
-        if errors:
-            lines.append("<b>Could not read:</b><br>" + "<br>".join(html.escape(e) for e in errors))
-        if not merged.courses:
+        if self._pdf_errors:
+            lines.append("<b style='color:#b02a37'>Could not read:</b><br>"
+                         + "<br>".join(html.escape(e) for e in self._pdf_errors))
+        if no_courses:
             lines.append("<b>No courses were found in the PDF(s).</b> "
                          "The layout may be new. Add rows by hand, or send an example "
                          "so the reader can learn the layout.")
-        if merged.review:
-            lines.append(self._review_html(merged.review, "PDF lines to check"))
-        self._details.setHtml("<br><br>".join(lines))
+        if self._notes:
+            lines.append(self._notes_html(self._notes))
+        if self._pdf_review:
+            lines.append(self._review_html(self._pdf_review, "PDF lines to check"))
+        return "<br>".join(lines) or "<p style='color:#6c757d'>Nothing else to note in the PDF(s).</p>"
+
+    @staticmethod
+    def _notes_html(notes: list[rm.ChangeNote]) -> str:
+        rows = "".join(
+            f"<tr><td><b>{html.escape(n.label)}</b></td><td>{html.escape(n.text)}</td>"
+            f"<td style='color:#6c757d'>{html.escape(n.source)}</td></tr>"
+            for n in notes
+        )
+        return f"<table cellspacing='0' cellpadding='3'>{rows}</table>"
 
     # ------------------------------------------------------------------
     # Table
@@ -358,13 +469,168 @@ class FulfillmentTab(QWidget):
     # Compare
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Wizard navigation
+    # ------------------------------------------------------------------
+
+    def _show_step(self, step: int):
+        self._reached = max(self._reached, step)
+        self._stack.setCurrentIndex(step)
+        for i, b in enumerate(self._step_btns):
+            b.setChecked(i == step)
+            b.setEnabled(i <= self._reached)
+        self._back_btn.setEnabled(step > _PDFS)
+        self._next_btn.setVisible(step < _RESULTS)
+        self._next_btn.setText({_PDFS: "Read PDFs  ›", _PASTE: "Next  ›",
+                                _REMOVALS: "▶  Check order"}.get(step, "Next  ›"))
+
+    def _go_to(self, step: int):
+        """Step bar click: going back is free; going forward runs each step's Next."""
+        while self._stack.currentIndex() < step:
+            if not self._advance():
+                return
+        if step < self._stack.currentIndex():
+            self._show_step(step)
+
+    def _on_back(self):
+        step = self._stack.currentIndex() - 1
+        if step == _REMOVALS and self._portal_result is None:
+            step = _PASTE   # removals were skipped (no portal list)
+        self._show_step(max(step, _PDFS))
+
+    def _on_next(self):
+        self._advance()
+
+    def _advance(self) -> bool:
+        """Run the current step's Next action and move on. False = stay put."""
+        step = self._stack.currentIndex()
+        if step == _PDFS:
+            if not self._pdf_results or self._pdf_paths_changed():
+                if not self._on_read_pdfs():
+                    return False
+            self._show_step(_COURSES)
+        elif step == _COURSES:
+            _courses, problems = self._table_courses()
+            if problems:
+                QMessageBox.warning(self, "Check the PDF course list",
+                                    "Fix or untick these rows first:\n\n" + "\n".join(problems))
+                return False
+            self._show_step(_PASTE)
+        elif step == _PASTE:
+            portal_text = self._portal.toPlainText()
+            self._portal_result = cc.parse_portal_list(portal_text) if portal_text.strip() else None
+            if self._portal_result is None:
+                # Nothing to choose removals from; the Order tab can still be checked.
+                self._on_check()
+                self._show_step(_RESULTS)
+                return True
+            self._fill_removals()
+            self._show_step(_REMOVALS)
+        elif step == _REMOVALS:
+            self._on_check()
+            self._show_step(_RESULTS)
+        else:
+            return False
+        return True
+
+    def _pdf_paths_changed(self) -> bool:
+        listed = {self._pdf_list.item(i).text() for i in range(self._pdf_list.count())}
+        return listed != {r.source for r in self._pdf_results} | {
+            e.split(":", 1)[0] for e in self._pdf_errors}
+
+    # ------------------------------------------------------------------
+    # Removals
+    # ------------------------------------------------------------------
+
+    def _fill_removals(self):
+        pdf_courses, _problems = self._table_courses()
+        portal = self._portal_result
+        key = (tuple(sorted(c.number for c in pdf_courses)),
+               tuple(c.number for c in portal.courses),
+               tuple(self._notes))
+        if key == self._plan_key:
+            return   # same inputs: keep the ticks the user already set
+        self._plan_key = key
+        plan = self._plan = rm.plan_removals(pdf_courses, portal.courses, self._notes)
+
+        if plan.partial:
+            self._removal_mode.setText(
+                "<b style='color:#b02a37'>This PDF looks like a change order, not a full course "
+                "list</b>, so nothing is ticked yet: unticked courses are archived and reset. "
+                "Tick the ones being removed (highlighted rows match the PDF's text).<br>"
+                "<span style='color:#6c757d'>" + html.escape(" ".join(plan.reasons)) + "</span>")
+        else:
+            self._removal_mode.setText(
+                "The PDF looks like a full course list, so every course that isn't on it is "
+                "ticked for archive and remove. Untick any the client is keeping.")
+
+        parts = [self._notes_html(self._notes)] if self._notes else [
+            "<p style='color:#6c757d'>The PDF has no upgrade or Course Archive text.</p>"]
+        if plan.warnings:
+            parts.append("<b style='color:#b02a37'>Check:</b><ul>" + "".join(
+                f"<li>{html.escape(w)}</li>" for w in plan.warnings) + "</ul>")
+        self._removal_text.setHtml("".join(parts))
+
+        self._rtable.blockSignals(True)
+        self._rtable.setRowCount(0)
+        # Highlighted (suggested) rows first so they're seen without scrolling.
+        for c in sorted(plan.candidates, key=lambda c: c.number not in plan.suggested):
+            r = self._rtable.rowCount()
+            self._rtable.insertRow(r)
+            tick = QTableWidgetItem()
+            tick.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled
+                          | Qt.ItemFlag.ItemIsSelectable)
+            tick.setCheckState(Qt.CheckState.Checked if c.number in plan.ticked
+                               else Qt.CheckState.Unchecked)
+            tick.setData(Qt.ItemDataRole.UserRole, c.number)
+            why = plan.suggested.get(c.number, "")
+            cells = [tick, QTableWidgetItem(c.number), QTableWidgetItem(c.name), QTableWidgetItem(why)]
+            for col, item in enumerate(cells):
+                if why:
+                    item.setBackground(QBrush(_SUGGESTED_BG))
+                self._rtable.setItem(r, col, item)
+        self._rtable.blockSignals(False)
+        self._tick_suggested_btn.setEnabled(bool(plan.suggested))
+        self._update_removal_count()
+
+    def _tick_removals(self, want, keep_others: bool = False):
+        self._rtable.blockSignals(True)
+        for r in range(self._rtable.rowCount()):
+            item = self._rtable.item(r, _RCOL_REMOVE)
+            if want(item.data(Qt.ItemDataRole.UserRole)):
+                item.setCheckState(Qt.CheckState.Checked)
+            elif not keep_others:
+                item.setCheckState(Qt.CheckState.Unchecked)
+        self._rtable.blockSignals(False)
+        self._update_removal_count()
+
+    def _removal_numbers(self) -> tuple[set[str], set[str]]:
+        """(ticked = archive and remove, unticked = keep as archive and reset)."""
+        ticked, unticked = set(), set()
+        for r in range(self._rtable.rowCount()):
+            item = self._rtable.item(r, _RCOL_REMOVE)
+            (ticked if item.checkState() == Qt.CheckState.Checked else unticked).add(
+                item.data(Qt.ItemDataRole.UserRole))
+        return ticked, unticked
+
+    def _update_removal_count(self):
+        ticked, unticked = self._removal_numbers()
+        total = len(ticked) + len(unticked)
+        self._removal_count.setText(
+            f"{len(ticked)} of {total} will be archived and removed; "
+            f"{len(unticked)} archived and reset" if total else
+            "Every portal course is on the PDF: nothing to remove.")
+
+    # ------------------------------------------------------------------
+    # Compare
+    # ------------------------------------------------------------------
+
     def _refresh_order(self, portal: cc.ParseResult | None = None):
         self._order_view.show_check(
             oc.check_order(self._email.toPlainText(), self._pdf_results, portal))
 
     def _on_check(self):
-        portal_text = self._portal.toPlainText()
-        portal = cc.parse_portal_list(portal_text) if portal_text.strip() else None
+        portal = self._portal_result
         self._refresh_order(portal)
 
         # Course lists need both sides; the Order sub-tab says what's missing.
@@ -375,9 +641,14 @@ class FulfillmentTab(QWidget):
             return
         if not pdf_courses or portal is None:
             self._clear_outputs()
+            self._details.setHtml(
+                "<p style='color:#6c757d'>The course lists need both the PDF courses and the "
+                "portal Content Licensing list.</p>")
             return
 
-        result = cc.compare(pdf_courses, portal.courses, portal.review + self._pdf_review)
+        _ticked, keep = self._removal_numbers()
+        result = cc.compare(pdf_courses, portal.courses, portal.review + self._pdf_review,
+                            keep=keep)
 
         for key, courses in (("add", result.to_add), ("remove", result.archive_remove),
                              ("reset", result.archive_reset)):
@@ -386,9 +657,9 @@ class FulfillmentTab(QWidget):
             field.setText(cc.format_numbers(courses))
             field.setCursorPosition(0)
 
-        self._details.setHtml(self._details_html(result, len(portal.courses)))
+        self._details.setHtml(self._details_html(result, len(portal.courses), keep))
 
-    def _details_html(self, r: cc.Comparison, portal_count: int) -> str:
+    def _details_html(self, r: cc.Comparison, portal_count: int, kept: set[str] = frozenset()) -> str:
         parts = []
         if r.review:
             parts.append(self._review_html(r.review, "Needs manual review (not in any list)"))
@@ -408,7 +679,9 @@ class FulfillmentTab(QWidget):
                                ("Archive and reset", r.archive_reset)):
             items = "".join(
                 f"<li><b>{html.escape(c.number)}</b> {html.escape(c.name)}"
-                + (f" <i>({html.escape(c.note)})</i>" if c.note else "") + "</li>"
+                + (f" <i>({html.escape(c.note)})</i>" if c.note else "")
+                + (" <i>(not on the PDF; kept in step 4)</i>"
+                   if title == "Archive and reset" and c.number in kept else "") + "</li>"
                 for c in courses
             ) or "<li><i>none</i></li>"
             parts.append(f"<h4>{title} ({len(courses)})</h4><ul>{items}</ul>")
@@ -439,10 +712,22 @@ class FulfillmentTab(QWidget):
     def _on_clear_all(self):
         self._pdf_list.clear()
         self._pdf_results = []
+        self._pdf_errors = []
         self._pdf_review = []
+        self._notes = []
+        self._portal_result = None
+        self._plan = None
+        self._plan_key = None
+        self._pdf_notes.clear()
+        self._rtable.setRowCount(0)
+        self._removal_text.clear()
+        self._removal_mode.clear()
+        self._removal_count.clear()
         self._fill_table([])
         self._email.clear()
         self._portal.clear()
         self._clear_outputs()
         self._order_view.clear()
         self._details.clear()
+        self._reached = _PDFS
+        self._show_step(_PDFS)

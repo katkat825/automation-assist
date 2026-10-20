@@ -282,6 +282,14 @@ def test_phase2_end_to_end(tmp_path):
     assert mails("Fail x 3") == []
     assert mails("Fail x 4") == ["fwd-bad@x.com"]
 
+    def note(name, email):
+        tt = sheets[name]
+        return next(r[2] for r in tt.rows if tt.get(r, "UserMail") == email)
+
+    assert note(a.SHEET_REPORT, "fwd-ok@x.com") == "forward to spam"
+    assert note("Fail x 4", "fwd-bad@x.com") == "forward to not spam"
+    assert note(a.SHEET_REPORT, "report@x.com") == "No"   # not a forward, left alone
+
     s = res2.summary
     assert (s.sent, s.passed, s.report, s.failed) == (7, 4, 2, 3)
     assert (s.reply, s.forward, s.click) == (1, 1, 1)

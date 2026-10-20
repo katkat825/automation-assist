@@ -178,6 +178,7 @@ class AttackSimView(QWidget):
                                enabled=False)
         row.addWidget(self._p1_folder)
         row.addStretch()
+        row.addWidget(_btn("Clear results", self._clear_phase1))
         forget = _btn("Forget column answers", self._forget_columns)
         forget.setToolTip("Clear the saved answers about unrecognised report columns, "
                           "so you're asked again next time.")
@@ -190,6 +191,13 @@ class AttackSimView(QWidget):
         lay.addWidget(self._p1_log, 1)
         self._update_names()
         return w
+
+    def _clear_phase1(self):
+        """Clear the results area; the chosen file and report name stay."""
+        self._p1_xlsx = ""
+        self._p1_open.setEnabled(False)
+        self._p1_folder.setEnabled(False)
+        self._p1_log.clear()
 
     def _prefix(self) -> str:
         return sim.report_prefix(self._month.currentText(), self._year.value(),
@@ -436,6 +444,7 @@ class AttackSimView(QWidget):
         row.addStretch()
         self._copy_btn = _btn("Copy summary", self._copy_summary, enabled=False)
         row.addWidget(self._copy_btn)
+        row.addWidget(_btn("Clear results", self._clear_phase2))
         b.addLayout(row)
 
         out = QHBoxLayout()
@@ -627,6 +636,17 @@ class AttackSimView(QWidget):
         self._import_btn.setEnabled(False)
         self._apply_btn.setEnabled(False)
         self._decided_lbl.setText("")
+
+    def _clear_phase2(self):
+        """Clear the forwards table, pasted text, summary and notes; the chosen
+        workbooks stay."""
+        self._clear_forwards()
+        self._paste.clear()
+        self._p2_out = ""
+        self._p2_open.setEnabled(False)
+        self._summary.clear()
+        self._copy_btn.setEnabled(False)
+        self._p2_log.clear()
 
     def _streak_lines(self, s: sim.Summary) -> list[str]:
         if not s.streaks:

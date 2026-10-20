@@ -146,10 +146,15 @@ def sku_lines(tables: Iterable[list[list[str]]], source: str) -> list[SkuLine]:
     return out
 
 
+# First row of the Course Archive table: "Archive and Reset", "Archive & Remove", ...
+_ARCHIVE_TABLE_RE = re.compile(r"^Archive\s*(?:and|&)\s*(?:Reset|Remove)\b", re.I)
+
+
 def archive_rows(tables: Iterable[list[list[str]]]) -> list[tuple[str, str]]:
-    """The SOW's Course Archive table (Archive and Reset / ... / Requested Date)."""
+    """The SOW's Course Archive table (Archive and Reset / Archive and Remove /
+    ... / Requested Date). Either archive row can come first, or be the only one."""
     for table in tables:
-        if table and table[0] and table[0][0].startswith("Archive and Reset"):
+        if table and table[0] and _ARCHIVE_TABLE_RE.match(cc.clean_text(table[0][0])):
             return [(r[0], r[1]) for r in table if len(r) >= 2 and r[0]]
     return []
 
