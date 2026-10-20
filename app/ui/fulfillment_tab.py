@@ -50,7 +50,14 @@ _RCOL_REMOVE, _RCOL_NUM, _RCOL_NAME, _RCOL_WHY = range(4)
 _STEPS = ("PDFs", "Courses on PDF", "Paste", "Removals", "Results")
 _PDFS, _COURSES, _PASTE, _REMOVALS, _RESULTS = range(5)
 
-_SUGGESTED_BG = QColor("#fff3cd")
+# Highlighted (suggested) rows: dark text set explicitly so they stay readable
+# when Windows is in dark mode (its default text colour there is white).
+_SUGGESTED_BG = QColor("#ffe08a")
+_SUGGESTED_FG = QColor("#212529")
+# Selected rows: the same in light and dark mode.
+_RTABLE_STYLE = (
+    "QTableWidget::item:selected { background: #0b5ed7; color: white; }"
+)
 
 _BTN = (
     "QPushButton { background: #6c757d; color: white; border-radius: 4px; padding: 0 12px; }"
@@ -230,6 +237,7 @@ class FulfillmentTab(QWidget):
                                 "unticked = archive and reset")
         tg = QVBoxLayout(table_group)
         self._rtable = QTableWidget(0, 4)
+        self._rtable.setStyleSheet(_RTABLE_STYLE)
         self._rtable.setHorizontalHeaderLabels(["Remove", "Number", "Course name", "Matches PDF text"])
         hdr = self._rtable.horizontalHeader()
         hdr.setSectionResizeMode(_RCOL_REMOVE, QHeaderView.ResizeMode.ResizeToContents)
@@ -588,6 +596,8 @@ class FulfillmentTab(QWidget):
             for col, item in enumerate(cells):
                 if why:
                     item.setBackground(QBrush(_SUGGESTED_BG))
+                    if col != _RCOL_REMOVE:   # the tick mark is drawn in this colour too
+                        item.setForeground(QBrush(_SUGGESTED_FG))
                 self._rtable.setItem(r, col, item)
         self._rtable.blockSignals(False)
         self._tick_suggested_btn.setEnabled(bool(plan.suggested))
