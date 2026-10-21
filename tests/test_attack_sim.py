@@ -350,3 +350,32 @@ def test_attachment_summary_says_attachment_opened():
                   reply=0, forward=0, click=1, creds=0, other=0, delivery_failed=0, streaks={})
     text = s.email_text()
     assert "\t\tAttachment Opened: 1" in text and "Click" not in text
+
+
+def test_phase2_email_lists(tmp_path):
+    res1 = _phase1_fixture(tmp_path)
+    prev = tmp_path / "Sept 2026 Ev Phish Results.xlsx"
+    _prev_workbook(prev)
+    res2 = a.finish_workbook(res1.xlsx, [True, False], prev, extra_email="boss@x.com")
+    sheets = a.read_workbook(res2.path)
+
+    def lines(name):
+        return res2.email_lists[name].read_text(encoding="utf-8").split()
+
+    assert set(res2.email_lists) == {"Pass - Report", "Pass - Not Report", "Fail x 1", "Fail x 2"}
+    assert all(p.name.startswith(res2.path.stem.replace(" Phish Results", "") + " ")
+               for p in res2.email_lists.values())
+    assert sorted(lines("Pass - Report")) == ["fwd-ok@x.com", "report@x.com"]
+    not_report = [sheets[n].get(r, "UserMail") for n in (a.SHEET_DELETE, a.SHEET_IGNORE)
+                  for r in sheets[n].rows]
+    assert lines("Pass - Not Report") == not_report + ["boss@x.com"]
+    assert lines("Fail x 1") == ["click@x.com", "boss@x.com"]
+    assert lines("Fail x 2") == ["reply@x.com", "boss@x.com"]
+
+
+def test_email_lists_without_extra(tmp_path):
+    res1 = _phase1_fixture(tmp_path)
+    res2 = a.finish_workbook(res1.xlsx, [True, True], None)
+    read = lambda name: res2.email_lists[name].read_text(encoding="utf-8").split()
+    assert sorted(read("Fail x 1")) == ["click@x.com", "reply@x.com"]
+    assert read("Fail x 2") == []

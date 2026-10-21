@@ -55,6 +55,7 @@ _COL_NAME, _COL_MAIL, _COL_FWD, _COL_REP, _COL_RESULT = range(5)
 # settings.json: {"data_analysis": {"attack_sim_columns": {column: "fail" | "ignore"}}}
 _SETTINGS_SECTION = "data_analysis"
 _SETTINGS_COLUMNS = "attack_sim_columns"
+_SETTINGS_EXTRA_EMAIL = "attack_sim_extra_email"   # added to the Phase 2 email lists
 
 
 def _btn(text, slot, primary=False, enabled=True):
@@ -383,6 +384,18 @@ class AttackSimView(QWidget):
         self._no_prev_chk = QCheckBox("No previous simulation — everyone who failed is Fail x 1")
         self._no_prev_chk.toggled.connect(lambda on: self._prev_edit.setEnabled(not on))
         g.addWidget(self._no_prev_chk)
+        row = QHBoxLayout()
+        lbl = QLabel("Extra address for lists:")
+        lbl.setMinimumWidth(150)
+        row.addWidget(lbl)
+        self._extra_email_edit = QLineEdit(
+            str(cfg.load().get(_SETTINGS_SECTION, {}).get(_SETTINGS_EXTRA_EMAIL, "")))
+        self._extra_email_edit.setPlaceholderText("someone@domain.com")
+        self._extra_email_edit.setToolTip(
+            "Added to the Pass - Not Report, Fail x 1 and Fail x 2 email lists "
+            "(not Pass - Report). Remembered for next time.")
+        row.addWidget(self._extra_email_edit, 1)
+        g.addLayout(row)
         lay.addWidget(grp)
 
         split = QSplitter(Qt.Orientation.Vertical)
@@ -604,9 +617,18 @@ class AttackSimView(QWidget):
             self._p2_log.setPlainText("Cancelled.")
             return
         unknown_fail, column_notes = answers
+        extra = self._extra_email_edit.text().strip()
+        if extra and "@" not in extra:
+            QMessageBox.warning(self, "MS Attack Sim",
+                                f"'{extra}' doesn't look like an email address.")
+            return
+        s = cfg.load()
+        s.setdefault(_SETTINGS_SECTION, {})[_SETTINGS_EXTRA_EMAIL] = extra
+        cfg.save(s)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            res = sim.finish_workbook(xlsx, self._decisions(), prev, unknown_fail=unknown_fail)
+            res = sim.finish_workbook(xlsx, self._decisions(), prev, unknown_fail=unknown_fail,
+                                      extra_email=extra)
         except PermissionError:
             self._p2_log.setPlainText("✗ Couldn't save — is the workbook open in Excel? "
                                       "Close it and try again.")
@@ -623,6 +645,9 @@ class AttackSimView(QWidget):
         lines = [f"✓ Saved {res.path.name}",
                  f"  forwards → Pass - Report: {res.moved_to_report},  → Fail: {res.moved_to_fail}"]
         lines += self._streak_lines(res.summary)
+        lines += ["", "Email lists" + (f" (+ {extra} on all but Pass - Report):" if extra
+                                       else " (no extra address added):")]
+        lines += [f"  • {p.name}" for p in res.email_lists.values()]
         if column_notes:
             lines += ["", "Unrecognised columns:"] + [f"  • {n}" for n in column_notes]
         if res.warnings:

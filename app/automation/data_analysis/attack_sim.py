@@ -29,7 +29,10 @@ Phase 2  phase-1 workbook + forward review results + previous final workbook
              prev Fail x N           -> Fail x N+1
              prev Pass - * / absent  -> Fail x 1
              prev Delivery Failed    -> Fail x 1, flagged for a manual look back
-         and the summary block for the results email is produced.
+         and the summary block for the results email is produced, plus one
+         email-only .csv each for Pass - Report, Pass - Not Report (Delete +
+         Ignore), Fail x 1 and Fail x 2. An extra address given in the tab is
+         added to every list except Pass - Report.
 
 No Qt in here — the tab is app/ui/data_analysis_tab.py.
 """
@@ -718,12 +721,58 @@ class Phase2Result:
     warnings: list[str]
     moved_to_report: int
     moved_to_fail: int
+    email_lists: dict[str, Path] = field(default_factory=dict)
+
+
+# Email-only lists written by Phase 2: list name -> sheets it's made from,
+# and whether the extra address is added.
+EMAIL_LISTS = [
+    ("Pass - Report", [SHEET_REPORT], False),
+    ("Pass - Not Report", [SHEET_DELETE, SHEET_IGNORE], True),
+    ("Fail x 1", [fail_x_sheet(1)], True),
+    ("Fail x 2", [fail_x_sheet(2)], True),
+]
+_RESULTS_SUFFIX = " Phish Results"
+
+
+def email_list_paths(workbook: str | Path) -> dict[str, Path]:
+    """"<prefix> <list> emails.csv" next to "<prefix> Phish Results.xlsx"."""
+    workbook = Path(workbook)
+    stem = workbook.stem
+    if stem.lower().endswith(_RESULTS_SUFFIX.lower()):
+        stem = stem[:-len(_RESULTS_SUFFIX)]
+    return {name: workbook.with_name(f"{stem} {name} emails.csv") for name, _, _ in EMAIL_LISTS}
+
+
+def write_email_lists(workbook: str | Path, sheets: dict[str, Table],
+                      extra_email: str = "") -> dict[str, Path]:
+    """One email address per line, no header, duplicates dropped, sheet order kept.
+    extra_email goes last on every list except Pass - Report."""
+    paths = email_list_paths(workbook)
+    extra = str(extra_email or "").strip()
+    for name, sources, add_extra in EMAIL_LISTS:
+        emails, seen = [], set()
+        for sheet in sources:
+            t = sheets.get(sheet)
+            for row in (t.rows if t else []):
+                e = str(t.get(row, COL_MAIL) or "").strip()
+                if has_value(e) and e.lower() not in seen:
+                    seen.add(e.lower())
+                    emails.append(e)
+        if add_extra and extra and extra.lower() not in seen:
+            emails.append(extra)
+        with open(paths[name], "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            for e in emails:
+                w.writerow([e])
+    return paths
 
 
 def finish_workbook(phase1_xlsx: str | Path, decisions: list[bool],
                     prev_xlsx: str | Path | None, *,
                     out_path: str | Path | None = None,
-                    unknown_fail: set[str] | None = None) -> Phase2Result:
+                    unknown_fail: set[str] | None = None,
+                    extra_email: str = "") -> Phase2Result:
     """Apply forward decisions + failure streaks and write the final workbook
     (overwrites the phase-1 workbook unless out_path is given).
 
@@ -803,11 +852,12 @@ def finish_workbook(phase1_xlsx: str | Path, decisions: list[bool],
     order += [n for n in sheets if n not in order]
 
     write_workbook(out_path, sheets, order)
+    lists = write_email_lists(out_path, sheets, extra_email)
     summary = summarize(sheets, unknown_fail)
     if summary.other:
         warnings.append(f"{summary.other} user(s) on a Fail sheet with no click, reply or forward "
                         "recorded — counted as 'Other'. Check them.")
-    return Phase2Result(out_path, summary, warnings, moved_r, moved_f)
+    return Phase2Result(out_path, summary, warnings, moved_r, moved_f, lists)
 
 
 def _reorder(row: list, src: Table, dst: Table) -> list:
