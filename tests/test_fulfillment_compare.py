@@ -158,12 +158,18 @@ def test_tags_and_wrapped_tags_are_stripped_and_kept_as_notes():
         (122, 43, "NEW"),
         (122, 298, "HIPAA Compliance Training 11072"),
         (133, 43, "Data Privacy Best Practices 10982"),
+        (144, 43, "Avoiding AI Phishing Attacks 10974 - UPDATED VERSION"),
+        (155, 43, "Preventing Insider Threats 10979 - UPDATED"),
+        (166, 43, "VERSION"),
+        (177, 43, "Physical Security Best Practices 10981"),
     ])
     r = cc.extract_courses_from_words([page], "p.pdf")
     by = {c.number: c for c in r.courses}
     assert by["11570"].name == "OWASP Top 10 11570" and by["11570"].note == "NEW"
     assert by["11537"].note == "NEW"
     assert by["10982"].name == "Data Privacy Best Practices 10982"
+    assert by["10974"].note == "UPDATED VERSION"
+    assert by["10981"].name == "Physical Security Best Practices 10981"
 
 
 def test_parenthetical_after_number_wraps_without_polluting_next_name():
@@ -220,11 +226,17 @@ def test_dates_prices_and_footers_are_not_courses():
         (70, 37, "License Term: 9/29/2026-9/28/2027"),
         (80, 37, "Renewal Courseware Licensing $23.00 350 $8,050.00"),
         (90, 37, "at least 1000 pixels wide and 300 dpi"),
+        (100, 37, "Billing Address: 4114 Legato Rd City, State, Zip: Fairfax. VA 22033"),
         (783, 25, "Document Ref: SC7SC-TR6MB-4GLAI-VHQE5"),
         (783, 542, "Page 6 of 7"),
     ])
     r = cc.extract_courses_from_words([page], "p.pdf")
     assert r.courses == []
+
+
+def test_two_capitals_before_a_number_is_still_a_course():
+    page = _words([(100, 43, "Cyber Showdown: Generative AI 11233")])
+    assert _numbers(cc.extract_courses_from_words([page], "p.pdf").courses) == ["11233"]
 
 
 def test_unreadable_number_line_goes_to_review():

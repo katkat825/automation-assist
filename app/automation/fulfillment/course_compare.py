@@ -66,10 +66,12 @@ _NUM_THEN_PAREN_RE = re.compile(rf"{_NOT_BEFORE}({_NUM})\s+\((.*)$")
 # Any number-like token, for the "couldn't read this line" safety net.
 _ANY_NUM_RE = re.compile(rf"{_NOT_BEFORE}\b({_NUM})\b(?![/.,]\d)")
 
-_TAG_WORDS = r"(?:NEW|UPDATED)"
+# "- NEW", "- UPDATED", "- UPDATED VERSION", "- NEW MODULE"
+_TAG_WORDS = r"(?:NEW|UPDATED)(?:\s+(?:VERSION|MODULE))?"
 _TRAILING_TAG_RE = re.compile(rf"\s+[-–—](?:\s*({_TAG_WORDS}))?\s*$", re.IGNORECASE)
 _LEADING_TAG_RE = re.compile(rf"^(?:[-–—]\s*)?({_TAG_WORDS})\b\s*|^[-–—]\s*$", re.IGNORECASE)
-_ONLY_TAG_RE = re.compile(rf"^[-–—]?\s*(?:{_TAG_WORDS})?\s*$", re.IGNORECASE)
+# ...including the second word of a tag that wrapped on its own ("- UPDATED" / "VERSION").
+_ONLY_TAG_RE = re.compile(rf"^[-–—]?\s*(?:{_TAG_WORDS}|VERSION|MODULE)?\s*$", re.IGNORECASE)
 
 # Lines that are never courses, whatever numbers they contain.
 _EXCLUDE_RE = re.compile(
@@ -85,6 +87,9 @@ _DATE_TAIL_RE = re.compile(
 )
 # Street addresses ("San Francisco, CA 94107 US") — ignored by the safety net.
 _ADDRESS_RE = re.compile(r"\b[A-Z]{2},? \d{5}(?:-\d{4})?\b")
+# The same, needing the punctuation after the city ("Fairfax, VA 22033", "Fairfax. VA
+# 22033") so "Generative AI 11233" isn't one.
+_POSTCODE_RE = re.compile(r"[,.]\s*[A-Z]{2},?\s+\d{5}(?:-\d{4})?\b")
 
 _MAX_WRAP_LINES = 3  # longest a course name realistically wraps
 
@@ -388,6 +393,8 @@ class _ColumnReader:
     def _emit(self, number: str, name: str, note: str = "") -> None:
         number = number.upper()
         name = clean_text(name)
+        if _POSTCODE_RE.search(name):
+            return  # a postcode ("Fairfax, VA 22033"), not a course
         if number in self.found:
             return  # listed twice in the proposal (it happens)
         if is_year_like(number) and _DATE_TAIL_RE.search(name):
@@ -692,7 +699,8 @@ def merge_results(results: Iterable[ParseResult]) -> ParseResult:
 # Comparison
 # ---------------------------------------------------------------------------
 
-def _name_key(name: str) -> str:
+def name_key(name: str) -> str:
+    """Course name without its number or punctuation, for comparing names."""
     name = re.sub(rf"\b{_NUM}\b:?", " ", name)
     name = re.sub(r"\((?:BEC)\)", " ", name)
     name = name.replace("&", " and ")
@@ -732,12 +740,12 @@ def compare(pdf_courses: Iterable[Course], portal_courses: Iterable[Course],
 
     replacements = []
     for a in to_add:
-        ak = _name_key(a.name)
+        ak = name_key(a.name)
         best, best_ratio = None, 0.0
         for r in remove:
             if base_number(r.number) == base_number(a.number):
                 continue  # a different variant of the same course, not a renumber
-            ratio = difflib.SequenceMatcher(None, ak, _name_key(r.name)).ratio()
+            ratio = difflib.SequenceMatcher(None, ak, name_key(r.name)).ratio()
             if ratio > best_ratio:
                 best, best_ratio = r, ratio
         if best is not None and best_ratio >= 0.85:

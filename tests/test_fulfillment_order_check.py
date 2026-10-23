@@ -41,7 +41,8 @@ def _sow(tables=SOW_TABLES, term="10/18/2026-10/17/2027"):
 
 
 def _estimate(tables=ESTIMATE_TABLES, url="Example.glsondemand.com"):
-    text = f"Estimate 16842\nOD URL\n{url}\nRenewal PD: 10/18/2026-10/17/2027"
+    text = (f"Estimate 16842\nSALES REP OD POC OD URL\nSam Rep plee@example.com {url}\n"
+            "Renewal PD: 10/18/2026-10/17/2027")
     dates, _ = cc.find_expiration_dates(text, "est.pdf")
     return cc.ParseResult(exp_dates=dates, source="est.pdf", text=text, tables=tables)
 
@@ -139,6 +140,52 @@ def test_date_url_company_and_sku_disagreements_are_warned():
     assert "Portal URL differs" in text
     assert "Company name differs" in text
     assert "only on SOW: DL-LMS1" in text
+
+
+def test_portal_url_forms():
+    assert oc.portal_url("Princeton.glsondemand.com") == "princeton.glsondemand.com"
+    assert oc.portal_url("https://princeton.glsondemand.com/") == "princeton.glsondemand.com"
+    assert oc.portal_url("Vibrenthealth") == "vibrenthealth.glsondemand.com"
+    assert oc.portal_url("NA SCORM") == oc.portal_url("N/A") == oc.portal_url("") == ""
+
+
+def test_email_od_field_is_the_portal_subdomain():
+    email = EMAIL.replace("URL: Example.glsondemand.com", "OD: example")
+    assert oc.check_order(email, [_sow(), _estimate()]).portal_url == "example.glsondemand.com"
+
+
+def test_estimate_od_poc_and_url_fill_gaps_in_the_email():
+    r = oc.check_order("", [_sow(), _estimate(url="Example")])
+    assert r.portal_url == "example.glsondemand.com"
+    assert r.poc == "plee@example.com"
+    assert r.company == "Example Co"   # SOW Prepared for
+
+
+def test_order_type_and_hosting():
+    sow = _sow()
+    sow.text = "RENEWAL INVOICE\n" + sow.text
+    r = oc.check_order(EMAIL, [sow, _estimate()])
+    assert (r.order_type, r.hosting) == (oc.RENEWAL, oc.GLS_HOSTED)
+
+    scorm_tables = [[["SKU", "Description", "Total Users"], ["DL-SCR", "Delivery: SCORM", "1"]]]
+    new = _estimate(tables=scorm_tables, url="NA SCORM")
+    new.text += "\nNew Client"
+    r = oc.check_order("", [new])
+    assert (r.order_type, r.hosting) == (oc.NEW_ACCOUNT, oc.SELF_HOSTED)
+
+
+def test_only_the_first_license_line_per_pdf_is_the_license_count():
+    tables = [[SOW_TABLES[0][0], SOW_TABLES[0][1],
+               ["CL-BD-RBT", "Roles-Based Training bundle", "$86.00", "30", "$2,580.00"]]]
+    r = oc.check_order(EMAIL.replace("76 users", "60 users"), [_sow(tables=tables), _estimate()])
+    assert r.sow_users == 60 and not any("License counts" in w for w in r.warnings)
+
+
+def test_sku_spelling_differences_are_not_warned():
+    est = [[ESTIMATE_TABLES[0][0], ["CL-SST-ESS x", "60", "1", "1"],
+            ["LMS Platform Licensing and Related Services:DL-LMS-1 Delivery", "1", "0", "0"]]]
+    r = oc.check_order(EMAIL, [_sow(), _estimate(tables=est)])
+    assert not any("SKUs differ" in w for w in r.warnings)
 
 
 def test_missing_inputs_are_warned():

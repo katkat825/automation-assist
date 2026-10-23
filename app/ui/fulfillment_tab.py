@@ -11,14 +11,16 @@ step-by-step wizard (Back / Next, or click a step you've already reached):
                  about what's being removed above them. Ticked = archive and
                  remove, unticked = archive and reset. A PDF that only lists
                  what's changing (an upgrade) starts with nothing ticked.
-    5. Results   Order   portal exp date, plus warnings wherever the email,
+    5. Results   Tasks   the work this order needs; BoldDesk tickets come with
+                         Subject / Body / Public reply ready to copy
+                 Order   portal exp date, plus warnings wherever the email,
                          SOW, estimate and portal disagree
                  Courses three comma-separated number lists (add / archive &
                          remove / archive & reset), each sorted by full course
                          name, plus a manual-review section.
 
 Logic lives in app/automation/fulfillment/ (course_compare.py, order_check.py,
-removals.py).
+removals.py, tasks.py, tickets.py).
 """
 
 from __future__ import annotations
@@ -39,7 +41,9 @@ from PySide6.QtWidgets import (
 from app.automation.fulfillment import course_compare as cc
 from app.automation.fulfillment import order_check as oc
 from app.automation.fulfillment import removals as rm
+from app.automation.fulfillment import tasks as ft
 from .fulfillment_order_view import OrderView
+from .fulfillment_tasks_view import TasksView
 
 _NUMBER_OK = re.compile(r"^\d{4,5}[A-Z]{0,4}$")
 
@@ -305,7 +309,10 @@ class FulfillmentTab(QWidget):
         dg.addWidget(self._details)
         layout.addWidget(details_group, stretch=1)
 
+        self._tasks_view = TasksView(self._button)
+
         self._result_tabs = QTabWidget()
+        self._result_tabs.addTab(self._tasks_view, "Tasks")
         self._result_tabs.addTab(self._order_view, "Order")
         self._result_tabs.addTab(courses, "Courses")
         return self._result_tabs
@@ -370,6 +377,7 @@ class FulfillmentTab(QWidget):
         self._fill_table(merged.courses)
         self._clear_outputs()
         self._details.clear()
+        self._tasks_view.clear()
         self._pdf_notes.setHtml(self._pdf_notes_html(not merged.courses))
         return True
 
@@ -635,13 +643,14 @@ class FulfillmentTab(QWidget):
     # Compare
     # ------------------------------------------------------------------
 
-    def _refresh_order(self, portal: cc.ParseResult | None = None):
-        self._order_view.show_check(
-            oc.check_order(self._email.toPlainText(), self._pdf_results, portal))
+    def _refresh_order(self, portal: cc.ParseResult | None = None) -> oc.OrderCheck:
+        check = oc.check_order(self._email.toPlainText(), self._pdf_results, portal)
+        self._order_view.show_check(check)
+        return check
 
     def _on_check(self):
         portal = self._portal_result
-        self._refresh_order(portal)
+        check = self._refresh_order(portal)
 
         # Course lists need both sides; the Order sub-tab says what's missing.
         pdf_courses, problems = self._table_courses()
@@ -649,25 +658,26 @@ class FulfillmentTab(QWidget):
             QMessageBox.warning(self, "Check the PDF course list",
                                 "Fix or untick these rows first:\n\n" + "\n".join(problems))
             return
+        result = None
         if not pdf_courses or portal is None:
             self._clear_outputs()
             self._details.setHtml(
                 "<p style='color:#6c757d'>The course lists need both the PDF courses and the "
                 "portal Content Licensing list.</p>")
-            return
+        else:
+            _ticked, keep = self._removal_numbers()
+            result = cc.compare(pdf_courses, portal.courses, portal.review + self._pdf_review,
+                                keep=keep)
+            for key, courses in (("add", result.to_add), ("remove", result.archive_remove),
+                                 ("reset", result.archive_reset)):
+                label, field = self._outputs[key]
+                label.setText(f"<b>{label.property('title')}</b> ({len(courses)})")
+                field.setText(cc.format_numbers(courses))
+                field.setCursorPosition(0)
+            self._details.setHtml(self._details_html(result, len(portal.courses), keep))
 
-        _ticked, keep = self._removal_numbers()
-        result = cc.compare(pdf_courses, portal.courses, portal.review + self._pdf_review,
-                            keep=keep)
-
-        for key, courses in (("add", result.to_add), ("remove", result.archive_remove),
-                             ("reset", result.archive_reset)):
-            label, field = self._outputs[key]
-            label.setText(f"<b>{label.property('title')}</b> ({len(courses)})")
-            field.setText(cc.format_numbers(courses))
-            field.setCursorPosition(0)
-
-        self._details.setHtml(self._details_html(result, len(portal.courses), keep))
+        self._tasks_view.show_plan(ft.build_plan(check, result))
+        self._result_tabs.setCurrentWidget(self._tasks_view)
 
     def _details_html(self, r: cc.Comparison, portal_count: int, kept: set[str] = frozenset()) -> str:
         parts = []
@@ -739,5 +749,6 @@ class FulfillmentTab(QWidget):
         self._clear_outputs()
         self._order_view.clear()
         self._details.clear()
+        self._tasks_view.clear()
         self._reached = _PDFS
         self._show_step(_PDFS)

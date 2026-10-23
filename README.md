@@ -52,7 +52,7 @@ never means reading around a check implementation.
 | **SCORM QA** | Static analysis of a course package: structure, SCORM API wiring, terminology, duplicates, spelling/spacing, questions, screen inventory, generated manual checklist |
 | **SCORM Runtime QA** | Drives a packaged course in a real browser and verifies tracking. Work in progress (see the Status: SCORM Runtime QA section below) |
 | **Website** | WordPress update check (reports only, never applies), a cache-clear for a known Elementor rendering bug, and a site health smoke test |
-| **Fulfillment** | Order check and renewal course list comparison: reads the SOW and QuickBooks estimate PDFs plus the pasted Order Info email and portal Content Licensing list; flags mismatches (dates, license counts, SKUs, URL, company) and outputs the portal exp date and add / archive & remove / archive & reset course numbers |
+| **Fulfillment** | Order intake wizard: reads the SOW and QuickBooks estimate PDFs plus the pasted Order Info email and portal Content Licensing list; flags mismatches (dates, license counts, SKUs, URL, company); outputs the portal exp date, add / archive & remove / archive & reset course numbers, and the order's task list with BoldDesk ticket text (subject, body, public reply) ready to paste |
 | **Data Analysis** | Report sorting and summaries, one sub-tab per report. **MS Attack Sim**: sorts the Defender Attack Simulation results export fail-first into Pass / forwards / Fail / Delivery Failed sheets plus a forwards .csv for review (phase 1), then applies the forward review, splits failures into Fail x N streaks from the previous simulation, and produces the results email summary (phase 2) |
 | **Scheduler** | Read-only view of what runs automatically and when |
 

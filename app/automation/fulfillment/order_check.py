@@ -33,7 +33,7 @@ from . import course_compare as cc
 # Matched by keyword so field order and small wording changes don't matter.
 # First match wins, so order matters where labels share words.
 EMAIL_FIELDS = (
-    ("portal_url", "Portal URL", r"\burl\b"),
+    ("portal_url", "Portal URL", r"\burl\b|^od$"),   # "OD: princeton" = the subdomain
     ("opp_name", "Opp name", r"\bopp\b"),
     ("company", "Company", r"\bcompany\b"),
     ("billing_poc", "Billing POC", r"\bbilling\b"),
@@ -85,7 +85,13 @@ SOW, ESTIMATE, UNKNOWN = "SOW", "Estimate", "Unknown"
 _ESTIMATE_RE = re.compile(r"\bEstimate\s+(\d{3,})\b")           # QuickBooks header
 _PANDADOC_RE = re.compile(r"\bDocument Ref:|\bPrepared for:")    # PandaDoc page stamp / cover
 _PREPARED_FOR_RE = re.compile(r"Prepared for:\s*\n?\s*(.+)")
-_PORTAL_URL_RE = re.compile(r"\b([\w-]+\.glsondemand\.com)\b", re.I)
+# Estimate header "SALES REP  OD POC  OD URL" and the line under it:
+# "Natalie Williams callen@princeton.com Princeton.glsondemand.com". OD URL may be
+# missing, a bare subdomain ("Vibrenthealth") or "NA SCORM".
+_ESTIMATE_CONTACT_RE = re.compile(
+    r"SALES REP\s+OD POC(?:\s+OD URL)?[ \t]*\n[^\n@]*?(\S+@\S+)[ \t]*([^\n]*)")
+
+PORTAL_DOMAIN = "glsondemand.com"
 
 # "CL-SST-ESS", "DL-LMS1", "CL-9282-CG"; may follow a colon with no space
 # ("Related Services:DL-LMS1").
@@ -97,6 +103,18 @@ _DESCRIPTION_HEADER_RE = re.compile(r"^description$", re.I)
 # Content-license SKUs carry the user count; delivery (DL-) and service lines
 # don't. Based on the 16842 example; widen if other license SKUs show up.
 LICENSE_SKU_PREFIXES = ("CL-",)
+
+RENEWAL, NEW_ACCOUNT = "Renewal", "New Account"
+# SOW title: "2026 RENEWAL PROPOSAL", "YEAR 2/3 RENEWAL PROPOSAL", "RENEWAL INVOICE".
+_RENEWAL_TITLE_RE = re.compile(r"\bRENEWAL\s+(?:PROPOSAL|INVOICE)\b")
+# Estimate note "New Client", or the new-client Organization Information form in the SOW.
+_NEW_ACCOUNT_RE = re.compile(r"\bNew Client\b|\bORGANIZATION INFORMATION\b")
+
+_COMMS_TOOLBOX_RE = re.compile(r"\bCommunications?\s+Tool(?:box|kit)\b", re.I)
+
+GLS_HOSTED, SELF_HOSTED = "GLS-Hosted", "Self-Hosted"
+HOSTING_SKU_PREFIXES = ("DL-LMS",)   # OnDemand hosting
+SCORM_SKU_PREFIXES = ("DL-SCR",)     # SCORM delivery = the client hosts it
 
 # "Ess Bdl_76 users_2026": underscores are word characters, so no \b here.
 _OPP_USERS_RE = re.compile(r"(?<!\d)(\d+)\s*users?(?![a-z])", re.I)
@@ -131,7 +149,7 @@ def sku_lines(tables: Iterable[list[list[str]]], source: str) -> list[SkuLine]:
         users_col = _column(header, _USERS_HEADER_RE)
         desc_col = _column(header, _DESCRIPTION_HEADER_RE)
         for row in table[1:]:
-            cell = _cell(row, sku_col)
+            cell = re.sub(r"-\s+(?=[A-Z0-9])", "-", _cell(row, sku_col))   # "PH-SAAS- PB"
             m = _SKU_RE.search(cell)
             if not m:
                 continue
@@ -185,17 +203,32 @@ class OrderCheck:
     archive: list[tuple[str, str]] = field(default_factory=list)
     exp: cc.ExpDateResult = field(default_factory=cc.ExpDateResult)
     warnings: list[str] = field(default_factory=list)
+    # Read once here so the task list doesn't re-derive them.
+    email: OrderEmail = field(default_factory=OrderEmail)
+    order_number: str = ""
+    order_type: str = ""                 # RENEWAL / NEW_ACCOUNT / "" (not detected)
+    sow_users: Optional[int] = None      # license count on the SOW's first CL- line
+    portal_users: Optional[int] = None   # license count on the pasted portal list
+    company: str = ""                    # email Full Company Name, else SOW Prepared for
+    portal_url: str = ""                 # normalised: email URL/OD, else estimate OD URL
+    hosting: str = ""                    # GLS_HOSTED / SELF_HOSTED / "" (not detected)
+    poc: str = ""                        # email OD Admin POC, else estimate OD POC
+    sources: list[str] = field(default_factory=list)   # PDF names, attached to tickets
+    estimate_sources: list[str] = field(default_factory=list)  # SKUs here were actually bought
+    has_comms_toolbox: bool = False      # the SOW lists the Communications Toolbox
 
 
 def check_order(email_text: str, pdfs: Iterable[cc.ParseResult],
                 portal: Optional[cc.ParseResult] = None) -> OrderCheck:
     pdfs = list(pdfs)
-    out = OrderCheck()
     email = parse_order_email(email_text)
+    out = OrderCheck(email=email, sources=[p.source for p in pdfs if p.source])
 
     by_kind: dict[str, list[cc.ParseResult]] = {SOW: [], ESTIMATE: [], UNKNOWN: []}
     for p in pdfs:
         by_kind[document_kind(p.text)].append(p)
+    out.estimate_sources = [p.source for p in by_kind[ESTIMATE]]
+    out.has_comms_toolbox = any(_COMMS_TOOLBOX_RE.search(p.text) for p in by_kind[SOW])
 
     # -- what's missing --------------------------------------------------
     if not email_text.strip():
@@ -215,7 +248,13 @@ def check_order(email_text: str, pdfs: Iterable[cc.ParseResult],
     # -- facts -----------------------------------------------------------
     for p in by_kind[ESTIMATE]:
         m = _ESTIMATE_RE.search(p.text)
+        out.order_number = out.order_number or m.group(1)
         out.facts.append(Fact("Order number", m.group(1), p.source))
+    for kind, pattern in ((RENEWAL, _RENEWAL_TITLE_RE), (NEW_ACCOUNT, _NEW_ACCOUNT_RE)):
+        src = next((p.source for p in by_kind[SOW] + by_kind[ESTIMATE] if pattern.search(p.text)), None)
+        if src and not out.order_type:
+            out.order_type = kind
+            out.facts.append(Fact("Order type", kind, src))
     for key, label in _EMAIL_LABELS.items():
         if email.fields.get(key):
             out.facts.append(Fact(label, email.fields[key], "Order email"))
@@ -224,14 +263,25 @@ def check_order(email_text: str, pdfs: Iterable[cc.ParseResult],
     prepared_for = [(m.group(1).strip(), p.source) for p in by_kind[SOW]
                     for m in [_PREPARED_FOR_RE.search(p.text)] if m]
     out.facts.extend(Fact("Prepared for", v, src) for v, src in prepared_for)
-    estimate_urls = [(m.group(1), p.source) for p in by_kind[ESTIMATE]
-                     for m in [_PORTAL_URL_RE.search(p.text)] if m]
-    out.facts.extend(Fact("Portal URL", v, src) for v, src in estimate_urls)
+    contacts = [(m.group(1), m.group(2).strip(), p.source) for p in by_kind[ESTIMATE]
+                for m in [_ESTIMATE_CONTACT_RE.search(p.text)] if m]
+    for poc, od_url, src in contacts:
+        out.facts.append(Fact("OD POC", poc, src))
+        if od_url:
+            out.facts.append(Fact("OD URL", od_url, src))
+    email_url = portal_url(email.fields.get("portal_url", ""))
+    estimate_urls = [(portal_url(u), u, src) for _, u, src in contacts]
+    out.portal_url = email_url or next((u for u, _, _ in estimate_urls if u), "")
+    out.company = email.fields.get("company", "") or next((v for v, _ in prepared_for), "")
+    out.poc = email.fields.get("training_poc", "") or next((poc for poc, _, _ in contacts), "")
 
     for p in by_kind[SOW] + by_kind[ESTIMATE]:
         out.skus.extend(sku_lines(p.tables, p.source))
     for p in by_kind[SOW]:
         out.archive.extend(archive_rows(p.tables))
+    out.hosting = _hosting(out.skus, out.portal_url, [u for _, u, _ in contacts])
+    if out.hosting:
+        out.facts.append(Fact("Hosting", out.hosting, "SKUs / OD URL"))
 
     # -- expiration date: the email's License Dates join the PDFs' terms --
     email_dates, _ = cc.find_expiration_dates(email_text, "Order email")
@@ -239,12 +289,17 @@ def check_order(email_text: str, pdfs: Iterable[cc.ParseResult],
     out.warnings.extend(out.exp.notes)
 
     # -- cross-checks ----------------------------------------------------
-    out.warnings.extend(_license_count_warnings(out.skus, email, portal))
+    counts = _license_counts(out.skus, email, portal)
+    if len({n for n, _ in counts}) > 1:
+        out.warnings.append("License counts don't match: "
+                            + "; ".join(f"{n} ({src})" for n, src in counts) + ".")
+    sow_sources = {p.source for p in by_kind[SOW]}
+    out.sow_users = next((n for n, src in counts if src.split(", ", 1)[-1] in sow_sources), None)
+    out.portal_users = next((n for n, src in counts if src == "portal"), None)
     out.warnings.extend(_sku_set_warnings(out.skus, by_kind))
-    url = email.fields.get("portal_url", "")
-    for est_url, src in estimate_urls:
-        if url and _url_key(url) != _url_key(est_url):
-            out.warnings.append(f"Portal URL differs: {url} (Order email) vs {est_url} ({src}).")
+    for est_url, raw, src in estimate_urls:
+        if email_url and est_url and email_url != est_url:
+            out.warnings.append(f"Portal URL differs: {email_url} (Order email) vs {raw} ({src}).")
     company = email.fields.get("company", "")
     for name, src in prepared_for:
         if company and not _names_overlap(company, name):
@@ -252,12 +307,17 @@ def check_order(email_text: str, pdfs: Iterable[cc.ParseResult],
     return out
 
 
-def _license_count_warnings(skus: list[SkuLine], email: OrderEmail,
-                            portal: Optional[cc.ParseResult]) -> list[str]:
-    counts: list[tuple[int, str]] = [
-        (s.users, f"{s.sku}, {s.source}") for s in skus
-        if s.users is not None and s.sku.startswith(LICENSE_SKU_PREFIXES)
-    ]
+def _license_counts(skus: list[SkuLine], email: OrderEmail,
+                    portal: Optional[cc.ParseResult]) -> list[tuple[int, str]]:
+    """(count, where it came from) for every source that states a license count.
+    Per PDF only the first CL- line counts: it's the main package, and later CL-
+    lines are add-on bundles with their own counts (16845: 230, then 20, 30, 125)."""
+    counts: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    for s in skus:
+        if s.users is not None and s.sku.startswith(LICENSE_SKU_PREFIXES) and s.source not in seen:
+            seen.add(s.source)
+            counts.append((s.users, f"{s.sku}, {s.source}"))
     if portal is not None:
         portal_counts = Counter(c.license_count for c in portal.courses
                                 if c.license_count not in (None, cc.DEMO_LICENSE_COUNT))
@@ -266,9 +326,7 @@ def _license_count_warnings(skus: list[SkuLine], email: OrderEmail,
     m = _OPP_USERS_RE.search(email.fields.get("opp_name", ""))
     if m:
         counts.append((int(m.group(1)), "opp name"))
-    if len({n for n, _ in counts}) > 1:
-        return ["License counts don't match: " + "; ".join(f"{n} ({src})" for n, src in counts) + "."]
-    return []
+    return counts
 
 
 def _sku_set_warnings(skus: list[SkuLine], by_kind: dict[str, list[cc.ParseResult]]) -> list[str]:
@@ -277,7 +335,12 @@ def _sku_set_warnings(skus: list[SkuLine], by_kind: dict[str, list[cc.ParseResul
     sow_sources = {p.source for p in by_kind[SOW]}
     on_sow = {s.sku for s in skus if s.source in sow_sources}
     on_est = {s.sku for s in skus if s.source not in sow_sources}
-    if on_sow == on_est:
+    # Same SKU spelt differently ("PH-SAAS-PB" / "PH-SAAS1-PB", "CL-SST-ELT2" /
+    # "CL-SST-ELT-2") isn't a difference worth a warning.
+    sow_keys, est_keys = {_sku_key(x) for x in on_sow}, {_sku_key(x) for x in on_est}
+    on_sow = {x for x in on_sow if _sku_key(x) not in est_keys}
+    on_est = {x for x in on_est if _sku_key(x) not in sow_keys}
+    if not on_sow and not on_est:
         return []
     parts = []
     if on_sow - on_est:
@@ -287,8 +350,27 @@ def _sku_set_warnings(skus: list[SkuLine], by_kind: dict[str, list[cc.ParseResul
     return ["SKUs differ between SOW and estimate (" + "; ".join(parts) + ")."]
 
 
-def _url_key(url: str) -> str:
-    return re.sub(r"^https?://", "", url.strip().casefold()).rstrip("/")
+def _sku_key(sku: str) -> str:
+    return re.sub(r"[^A-Z]", "", sku)
+
+
+def portal_url(value: str) -> str:
+    """'Princeton.glsondemand.com', 'https://princeton.glsondemand.com/', or a bare
+    subdomain ('princeton', 'Vibrenthealth') -> 'princeton.glsondemand.com'.
+    '' for anything that isn't a portal ('NA SCORM', 'N/A', blank)."""
+    v = re.sub(r"^https?://", "", cc.clean_text(value).casefold()).strip("/ ")
+    if not v or re.search(r"\bn/?a\b|\bscorm\b|\s", v):
+        return ""
+    return v if "." in v else f"{v}.{PORTAL_DOMAIN}"
+
+
+def _hosting(skus: list[SkuLine], url: str, od_urls: list[str]) -> str:
+    if url or any(s.sku.startswith(HOSTING_SKU_PREFIXES) for s in skus):
+        return GLS_HOSTED
+    if (any(s.sku.startswith(SCORM_SKU_PREFIXES) for s in skus)
+            or any(re.search(r"\bscorm\b", u, re.I) for u in od_urls)):
+        return SELF_HOSTED
+    return ""
 
 
 def _names_overlap(a: str, b: str) -> bool:
