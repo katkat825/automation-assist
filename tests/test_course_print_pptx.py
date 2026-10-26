@@ -58,11 +58,11 @@ def _make_print(path, with_images=True):
     doc.save(path)
 
 
-def _convert(layout="notes", with_images=True):
+def _convert(with_images=True):
     d = tempfile.mkdtemp()
     src = os.path.join(d, "print.docx")
     _make_print(src, with_images)
-    summary = d2p.convert(src, layout=layout)
+    summary = d2p.convert(src)
     return summary, Presentation(summary["out"])
 
 
@@ -98,23 +98,55 @@ def test_slide_plan_and_deck():
     assert specs[6].pill == "5 of 2" and specs[6].title == "Knowledge Check"
 
 
-def test_notes_carry_transcript_and_answer_key():
+def _slide_text(slide):
+    return " ".join(sh.text_frame.text for sh in slide.shapes if sh.has_text_frame)
+
+
+def test_no_speaker_notes():
     _, prs = _convert()
-    notes = [sl.notes_slide.notes_text_frame.text if sl.has_notes_slide else ""
-             for sl in prs.slides]
-    assert "Narration for screen one." in notes[3]
-    assert "• A bullet point" in notes[3]
-    assert "previous slide" in notes[4]                     # second view of same screen
-    quiz = notes[6]
-    assert "Pick One" in quiz
-    assert "The right one  [Correct]" in quiz
-    assert "The wrong one  [Correct]" not in quiz
+    assert not any(sl.has_notes_slide for sl in prs.slides)
 
 
-def test_side_layout_puts_text_on_slide():
-    _, prs = _convert(layout="side")
-    texts = " ".join(sh.text_frame.text for sh in prs.slides[3].shapes if sh.has_text_frame)
-    assert "Narration for screen one." in texts
+def test_screenshot_with_text_panel_beside_it():
+    _, prs = _convert()
+    for i in (3, 4):                                        # both views of screen one
+        sl = prs.slides[i]
+        pics = [sh for sh in sl.shapes if sh.shape_type == 13]
+        assert len(pics) == 1
+        assert "Narration for screen one." in _slide_text(sl)
+        assert "A bullet point" in _slide_text(sl)
+        panel = [sh for sh in sl.shapes if sh.has_text_frame
+                 and "Narration for screen one." in sh.text_frame.text][0]
+        assert panel.left >= pics[0].left + pics[0].width     # panel is to the right
+    quiz = _slide_text(prs.slides[6])
+    assert "Pick One" in quiz and "✓  The right one" in quiz and "•  The wrong one" in quiz
+
+
+def test_long_text_carries_on_to_next_slide():
+    d = tempfile.mkdtemp()
+    src = os.path.join(d, "long.docx")
+    doc = Document()
+    doc.add_paragraph("Long Course", style="Title")
+    doc.add_paragraph("1 of 1 | Wordy Screen", style="Heading 2")
+    doc.add_picture(_png("blue"), width=Inches(6))
+    _bold(doc, "Audio Transcript:")
+    paras = [f"Paragraph {n}. " + "Lots of narration text here. " * 12 for n in range(30)]
+    for para in paras:
+        doc.add_paragraph(para)
+    doc.save(src)
+    s = d2p.convert(src)
+    prs = Presentation(s["out"])
+    screens = list(prs.slides)[1:]
+    assert len(screens) > 1 and s["slides"] == len(prs.slides)
+    texts = [_slide_text(sl) for sl in screens]
+    assert all(f"Part {i + 1} of {len(screens)}" in tx for i, tx in enumerate(texts))
+    assert all("continued on the next slide" in tx for tx in texts[:-1])
+    assert "continued" not in texts[-1]
+    for sl in screens:                                      # same screenshot on each part
+        assert sum(sh.shape_type == 13 for sh in sl.shapes) == 1
+    joined = " ".join(texts)
+    assert all(f"Paragraph {n}." in joined for n in range(30))   # nothing dropped
+    assert not any(sl.has_notes_slide for sl in prs.slides)
 
 
 def test_text_only_print_still_converts():

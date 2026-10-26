@@ -1,7 +1,7 @@
 """
 Course Print tab — convert a finished course print (.docx) into a PowerPoint.
 
-Pick the course print, choose a slide layout, Convert. The deck is written
+Pick the course print, Convert. The deck is written
 next to the .docx (or wherever you choose) and can be opened from here.
 
 Logic lives in app/automation/course_print/docx_to_pptx.py.
@@ -16,7 +16,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
-    QColorDialog, QComboBox, QFileDialog, QGroupBox, QHBoxLayout, QLabel,
+    QColorDialog, QFileDialog, QGroupBox, QHBoxLayout, QLabel,
     QLineEdit, QMessageBox, QProgressBar, QPushButton, QVBoxLayout, QWidget,
 )
 
@@ -32,12 +32,6 @@ _BTN_PRIMARY = (
     "QPushButton:hover { background: #157347; }"
     "QPushButton:disabled { background: #6c757d; }"
 )
-
-_LAYOUT_CHOICES = [
-    ("Large screenshot — transcript in speaker notes", "notes"),
-    ("Screenshot + transcript panel beside it", "side"),
-]
-
 
 class _Signals(QObject):
     progress = Signal(int, int)
@@ -68,8 +62,8 @@ class CoursePrintTab(QWidget):
         intro = QLabel(
             "Turns a course print (.docx) into a 16:9 deck: a title slide, a divider per "
             "module, and one slide per screenshot (each captured state / layer gets its own "
-            "slide). Narration, feedback and quiz answers go into the speaker notes; the "
-            "correct answer is marked [Correct]."
+            "slide), with the narration, feedback and quiz answers in a panel beside the "
+            "screenshot and the correct answer ticked. Nothing goes in the speaker notes."
         )
         intro.setWordWrap(True)
         intro.setStyleSheet("color: #555;")
@@ -99,17 +93,6 @@ class CoursePrintTab(QWidget):
         g.addLayout(row)
 
         row = QHBoxLayout()
-        row.addWidget(QLabel("Slide layout:"))
-        self._layout_combo = QComboBox()
-        for label, key in _LAYOUT_CHOICES:
-            self._layout_combo.addItem(label, key)
-        self._layout_combo.setToolTip(
-            "Large screenshot: best for presenting or sharing — the slide is the screen.\n"
-            "Screenshot + panel: transcript / feedback / answer choices shown on the slide\n"
-            "(font shrinks to fit; anything that doesn't fit stays in the speaker notes)."
-        )
-        row.addWidget(self._layout_combo)
-        row.addSpacing(16)
         row.addWidget(QLabel("Accent colour:"))
         self._color_btn = QPushButton()
         self._color_btn.setFixedSize(60, 24)
@@ -208,7 +191,6 @@ class CoursePrintTab(QWidget):
                                      f"{os.path.basename(out)} already exists. Replace it?")
             if r != QMessageBox.StandardButton.Yes:
                 return
-        layout = self._layout_combo.currentData()
         self._convert_btn.setEnabled(False)
         self._open_btn.setEnabled(False)
         self._folder_btn.setEnabled(False)
@@ -219,7 +201,7 @@ class CoursePrintTab(QWidget):
 
         def work():
             try:
-                summary = d2p.convert(src, out, layout=layout, accent=accent,
+                summary = d2p.convert(src, out, accent=accent,
                                       progress=lambda i, n: sig.progress.emit(i, n))
                 sig.finished.emit(summary)
             except PermissionError:

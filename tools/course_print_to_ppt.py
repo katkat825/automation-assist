@@ -15,15 +15,15 @@ How to run (any of these):
 
 The deck is saved next to the .docx with the same name (.pptx) unless -o is given.
 
-What you get (16:9, blue accent, "side" layout):
+What you get (16:9, blue accent):
     * Title slide from the print's Title
     * A divider slide for each "Module N: ..." Heading 1
     * One slide per screenshot (each captured state / layer gets its own slide),
       screenshot on the left, transcript / feedback / answer choices in a panel
-      on the right. Long text shrinks to fit; anything that still doesn't fit
-      is marked "continued in speaker notes".
-    * The full narration, feedback and quiz answers in the speaker notes,
-      with the correct answer marked [Correct].
+      on the right, with the correct answer ticked. Long text shrinks to fit;
+      anything that still doesn't fit carries on to another slide with the
+      same screenshot ("Part 2 of 2").
+    * Nothing in the speaker notes.
 
 The course print is expected to use Word's built-in styles:
     Title, Heading 1 (module), Heading 2 ("1 of 8 | Screen title"),
@@ -38,7 +38,7 @@ import math
 import os
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Optional
 
 try:
@@ -59,7 +59,6 @@ except ImportError as _e:
         input("\nPress Enter to close...")
     sys.exit(1)
 
-LAYOUTS = ("notes", "side")
 DEFAULT_ACCENT = "1F3A5F"
 
 # ---------------------------------------------------------------- model
@@ -228,7 +227,8 @@ class SlideSpec:
     info: str = ""                # quiz type line
     image: Optional[tuple] = None
     blocks: list = field(default_factory=list)
-    notes: str = ""
+    lines: Optional[list] = None  # panel text for this slide (set by _paginate)
+    more: bool = False            # text carries on to the next slide
 
 
 def _split_module(heading: str) -> tuple[str, str]:
@@ -238,7 +238,7 @@ def _split_module(heading: str) -> tuple[str, str]:
 
 
 def _block_lines(blocks: list) -> list[tuple[str, str]]:
-    """Flatten blocks into (kind, text) lines for notes / on-slide panels."""
+    """Flatten blocks into (kind, text) lines for the on-slide text panel."""
     out = []
     for b in blocks:
         if b.kind == "table":
@@ -259,32 +259,6 @@ def _block_lines(blocks: list) -> list[tuple[str, str]]:
         else:
             out.append((b.kind, b.text))
     return out
-
-
-def _notes_text(spec_info: str, blocks: list) -> str:
-    """Speaker-notes text: labels in caps, a blank line between paragraphs,
-    consecutive bullets kept together."""
-    chunks: list[str] = []
-    if spec_info:
-        chunks.append(f"({spec_info})")
-    prev = ""
-    for kind, text in _block_lines(blocks):
-        if kind == "label":
-            chunks.append(text.upper())
-        elif kind in ("bullet", "correct"):
-            line = f"• {text}"
-            if prev in ("bullet", "correct", "label") and chunks:
-                chunks[-1] += "\n" + line
-            else:
-                chunks.append(line)
-        elif kind == "info":
-            chunks.append(f"({text})")
-        elif prev == "label" and chunks:
-            chunks[-1] += "\n" + text
-        else:
-            chunks.append(text)
-        prev = kind
-    return "\n\n".join(chunks).strip()
 
 
 def plan_slides(cp: CoursePrint) -> list[SlideSpec]:
@@ -320,7 +294,6 @@ def plan_slides(cp: CoursePrint) -> list[SlideSpec]:
             ctx = f"{module}  ·  {screen_ctx}" if screen_ctx else module
             eyebrow, pill, tag = ctx, screen_pill, "Layer"
 
-        notes = _notes_text(info, body)
         images = node.images or [None]
         for i, img in enumerate(images):
             t = tag
@@ -328,10 +301,7 @@ def plan_slides(cp: CoursePrint) -> list[SlideSpec]:
                 t = (f"{tag} · " if tag else "") + f"View {i + 1} of {len(images)}"
             specs.append(SlideSpec(
                 "screen", eyebrow=eyebrow, title=title, pill=pill, tag=t, info=info,
-                image=img, blocks=body,
-                notes=notes if i == 0 else
-                f"Additional view of “{title}” — transcript is on the previous slide.\n\n{notes}"
-                if notes else ""))
+                image=img, blocks=body))
     return specs
 
 
@@ -433,19 +403,20 @@ def _fit_lines(lines, width_in, height_in):
     return 10, kept, True
 
 
-def _panel_text(slide, x, y, w, h, lines, accent):
+def _panel_text(slide, x, y, w, h, lines, accent, more=False):
     pad = Inches(0.2)
     _rect(slide, x, y, w, h, PANEL)
     inner_w, inner_h = (w - 2 * pad) / 914400, (h - 2 * pad) / 914400
-    size, kept, truncated = _fit_lines(lines, inner_w, inner_h)
+    size, kept, _ = _fit_lines(lines, inner_w, inner_h)
+    kept = lines                  # _paginate already split long text across slides
     tb = slide.shapes.add_textbox(x + pad, y + pad, w - 2 * pad, h - 2 * pad)
     tf = tb.text_frame
     tf.word_wrap = True
     tf.auto_size = MSO_AUTO_SIZE.NONE
     tf.margin_left = tf.margin_right = tf.margin_top = tf.margin_bottom = 0
     first = True
-    if truncated:
-        kept = kept + [("more", "… continued in speaker notes")]
+    if more:
+        kept = kept + [("more", "… continued on the next slide")]
     for kind, text in kept:
         p = tf.paragraphs[0] if first else tf.add_paragraph()
         p.space_after = Pt(size * 0.5)
@@ -495,11 +466,6 @@ def _placeholder(slide, x, y, w, h, msg):
     r.font.color.rgb = MUTED
 
 
-def _set_notes(slide, text):
-    if text:
-        slide.notes_slide.notes_text_frame.text = text
-
-
 def _render_title(prs, spec, accent):
     s = prs.slides.add_slide(prs.slide_layouts[6])
     _rect(s, 0, 0, SLIDE_W, SLIDE_H, accent)
@@ -524,7 +490,7 @@ def _render_section(prs, spec, accent, course_title):
           _tint(accent, 0.6))
 
 
-def _render_screen(prs, spec, accent, layout, course_title, idx, total):
+def _render_screen(prs, spec, accent, course_title, idx, total):
     s = prs.slides.add_slide(prs.slide_layouts[6])
     right = SLIDE_W - MARGIN
     # header
@@ -541,51 +507,84 @@ def _render_screen(prs, spec, accent, layout, course_title, idx, total):
     tsize = 26 if len(spec.title) <= 55 else 22 if len(spec.title) <= 75 else 18
     _text(s, MARGIN, Inches(0.66), head_w, Inches(0.62), spec.title, tsize, INK, bold=True,
           anchor=MSO_ANCHOR.MIDDLE)
-    top = Inches(1.42)
     if spec.info:
         _text(s, MARGIN, Inches(1.28), head_w, Inches(0.3), spec.info, 12, MUTED)
-        top = Inches(1.68)
     # footer
     _rect(s, MARGIN, Inches(7.02), SLIDE_W - 2 * MARGIN, Emu(9525), RULE)
     _text(s, MARGIN, Inches(7.1), Inches(9), Inches(0.28), course_title, 10, MUTED)
     _text(s, right - Inches(2), Inches(7.1), Inches(2), Inches(0.28), f"{idx} / {total}", 10,
           MUTED, align=PP_ALIGN.RIGHT)
 
-    bottom = Inches(6.88)
-    area_h = bottom - top
-    lines = _block_lines(spec.blocks)
+    lines = spec.lines if spec.lines is not None else _block_lines(spec.blocks)
+    px, py, pw, ph = _panel_box(spec)
 
     if spec.image is None:
         if lines:
-            _panel_text(s, MARGIN, top, SLIDE_W - 2 * MARGIN, area_h, lines, accent)
+            _panel_text(s, px, py, pw, ph, lines, accent, spec.more)
         else:
-            _placeholder(s, MARGIN, top, SLIDE_W - 2 * MARGIN, area_h,
+            _placeholder(s, px, py, pw, ph,
                          "No screenshot or text for this screen in the course print")
     else:
-        if layout == "side" and lines:
-            gap = Inches(0.3)
-            img_w = Inches(7.7)
-            img_box = (MARGIN, top, img_w, area_h)
-            panel_x = MARGIN + img_w + gap
-            _panel_text(s, panel_x, top, right - panel_x, area_h, lines, accent)
-        else:
-            img_box = (MARGIN, top, SLIDE_W - 2 * MARGIN, area_h)
+        # always the screenshot on the left with the text panel beside it
+        _panel_text(s, px, py, pw, ph,
+                    lines or [("more", "No narration or on-screen text for this screen.")],
+                    accent, spec.more)
+        img_box = (MARGIN, py, IMG_W, ph)
         try:
             pic = _add_picture(s, spec.image[0], *img_box)
-            if layout == "side":       # top-align the screenshot beside the panel
-                pic.top = int(top)
+            pic.top = int(py)          # top-align the screenshot beside the panel
         except Exception as e:  # unsupported format (EMF, etc.)
             _placeholder(s, *img_box, f"Image could not be placed ({type(e).__name__})")
-    _set_notes(s, spec.notes)
 
 
-def build_deck(cp: CoursePrint, out_path: str, layout: str = "notes",
-               accent: str = DEFAULT_ACCENT,
+IMG_W, GAP = Inches(7.7), Inches(0.3)
+PANEL_PAD = Inches(0.2)
+
+
+def _panel_box(spec) -> tuple:
+    """(x, y, w, h) of a screen slide's text panel."""
+    top = Inches(1.68) if spec.info else Inches(1.42)
+    h = Inches(6.88) - top
+    if spec.image is None:
+        return MARGIN, top, SLIDE_W - 2 * MARGIN, h
+    x = MARGIN + IMG_W + GAP
+    return x, top, SLIDE_W - MARGIN - x, h
+
+
+def _paginate(specs: list) -> list:
+    """Text that won't fit the panel even at the smallest font carries on to
+    extra slides showing the same screenshot, tagged "Part n of N"."""
+    out = []
+    for spec in specs:
+        lines = _block_lines(spec.blocks) if spec.kind == "screen" else []
+        if not lines:
+            out.append(spec)
+            continue
+        _, _, w, h = _panel_box(spec)
+        inner_w, inner_h = (w - 2 * PANEL_PAD) / 914400, (h - 2 * PANEL_PAD) / 914400
+        pages = []
+        while lines:
+            _, kept, truncated = _fit_lines(lines, inner_w, inner_h)
+            if not truncated:
+                pages.append(lines)
+                break
+            # leave room for the "continued" line; always move forward
+            _, kept, _ = _fit_lines(lines, inner_w, inner_h - 0.35)
+            kept = kept or lines[:1]
+            pages.append(kept)
+            lines = lines[len(kept):]
+        for i, page in enumerate(pages):
+            tag = spec.tag
+            if len(pages) > 1:
+                tag = (f"{tag} · " if tag else "") + f"Part {i + 1} of {len(pages)}"
+            out.append(replace(spec, tag=tag, lines=page, more=i < len(pages) - 1))
+    return out
+
+
+def build_deck(cp: CoursePrint, out_path: str, accent: str = DEFAULT_ACCENT,
                progress: Optional[Callable[[int, int], None]] = None) -> dict:
-    if layout not in LAYOUTS:
-        raise ValueError(f"layout must be one of {LAYOUTS}")
     acc = _rgb(accent)
-    specs = plan_slides(cp)
+    specs = _paginate(plan_slides(cp))
     prs = Presentation()
     prs.slide_width, prs.slide_height = SLIDE_W, SLIDE_H
     prs.core_properties.title = cp.title
@@ -596,7 +595,7 @@ def build_deck(cp: CoursePrint, out_path: str, layout: str = "notes",
         elif spec.kind == "section":
             _render_section(prs, spec, acc, cp.title)
         else:
-            _render_screen(prs, spec, acc, layout, cp.title, i, total)
+            _render_screen(prs, spec, acc, cp.title, i, total)
         if progress:
             progress(i, total)
     prs.save(out_path)
@@ -611,18 +610,14 @@ def build_deck(cp: CoursePrint, out_path: str, layout: str = "notes",
     }
 
 
-def convert(docx_path: str, out_path: Optional[str] = None, layout: str = "notes",
-            accent: str = DEFAULT_ACCENT,
+def convert(docx_path: str, out_path: Optional[str] = None, accent: str = DEFAULT_ACCENT,
             progress: Optional[Callable[[int, int], None]] = None) -> dict:
     """Convert a course print .docx to .pptx. Returns a summary dict."""
     out_path = out_path or os.path.splitext(docx_path)[0] + ".pptx"
     cp = parse_course_print(docx_path)
-    summary = build_deck(cp, out_path, layout=layout, accent=accent, progress=progress)
+    summary = build_deck(cp, out_path, accent=accent, progress=progress)
     summary["title"] = cp.title
     return summary
-
-
-LAYOUT = "side"
 
 
 def _pick_file() -> Optional[str]:
@@ -663,7 +658,7 @@ def main(argv=None):
                 print(f"  slide {i} of {n}")
 
         try:
-            s = convert(src, out, LAYOUT, DEFAULT_ACCENT, progress=prog)
+            s = convert(src, out, DEFAULT_ACCENT, progress=prog)
         except PermissionError:
             print(f"Couldn't write {out} - is it open in PowerPoint? Close it and try again.")
             return 1
