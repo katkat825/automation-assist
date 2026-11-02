@@ -23,9 +23,13 @@ answer choices in a panel beside it. The font shrinks to fit; text that still
 won't fit carries on to another slide with the same screenshot. Nothing is
 put in the speaker notes.
 
+With images=False (--no-images) the screenshots are left out: each screen
+becomes one full-width text slide, and a screen that had only a screenshot
+keeps its slide (its heading is the content) with a "no text" note.
+
 Usage:
     python -m app.automation.course_print.docx_to_pptx print.docx [-o out.pptx]
-           [--accent 1F3A5F]
+           [--accent 1F3A5F] [--no-images]
 """
 from __future__ import annotations
 
@@ -514,9 +518,7 @@ def _render_screen(prs, spec, accent, course_title, idx, total):
                          "No screenshot or text for this screen in the course print")
     else:
         # always the screenshot on the left with the text panel beside it
-        _panel_text(s, px, py, pw, ph,
-                    lines or [("more", "No narration or on-screen text for this screen.")],
-                    accent, spec.more)
+        _panel_text(s, px, py, pw, ph, lines or [("more", NO_TEXT)], accent, spec.more)
         img_box = (MARGIN, py, IMG_W, ph)
         try:
             pic = _add_picture(s, spec.image[0], *img_box)
@@ -525,6 +527,7 @@ def _render_screen(prs, spec, accent, course_title, idx, total):
             _placeholder(s, *img_box, f"Image could not be placed ({type(e).__name__})")
 
 
+NO_TEXT = "No narration or on-screen text for this screen."
 IMG_W, GAP = Inches(7.7), Inches(0.3)
 PANEL_PAD = Inches(0.2)
 
@@ -598,11 +601,23 @@ def build_deck(cp: CoursePrint, out_path: str, accent: str = DEFAULT_ACCENT,
     }
 
 
+def _strip_images(cp: CoursePrint) -> None:
+    """Drop the screenshots for a text-only deck."""
+    for n in cp.nodes:
+        had = n.has_content
+        n.images = []
+        if had and not n.has_content:      # screenshot-only screen: keep the slide
+            n.blocks.append(Block("more", NO_TEXT))
+
+
 def convert(docx_path: str, out_path: Optional[str] = None, accent: str = DEFAULT_ACCENT,
-            progress: Optional[Callable[[int, int], None]] = None) -> dict:
+            progress: Optional[Callable[[int, int], None]] = None,
+            images: bool = True) -> dict:
     """Convert a course print .docx to .pptx. Returns a summary dict."""
     out_path = out_path or os.path.splitext(docx_path)[0] + ".pptx"
     cp = parse_course_print(docx_path)
+    if not images:
+        _strip_images(cp)
     summary = build_deck(cp, out_path, accent=accent, progress=progress)
     summary["title"] = cp.title
     return summary
@@ -613,8 +628,9 @@ def main(argv=None):
     ap.add_argument("docx", help="course print .docx")
     ap.add_argument("-o", "--out", default=None, help="output .pptx (default: next to the .docx)")
     ap.add_argument("--accent", default=DEFAULT_ACCENT, help="accent colour, hex (default 1F3A5F)")
+    ap.add_argument("--no-images", action="store_true", help="leave the screenshots out (text only)")
     a = ap.parse_args(argv)
-    s = convert(a.docx, a.out, a.accent)
+    s = convert(a.docx, a.out, a.accent, images=not a.no_images)
     print(f"Course     : {s['title']}")
     print(f"Slides     : {s['slides']}  ({s['sections']} section dividers, "
           f"{s['screen_slides']} screen slides, {s['text_only']} text-only)")

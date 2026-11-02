@@ -10,6 +10,7 @@ Requirements (one-time):
 How to run (any of these):
     python course_print_to_ppt.py "HIPAA course print.docx"
     python course_print_to_ppt.py "HIPAA course print.docx" -o "HIPAA deck.pptx"
+    python course_print_to_ppt.py "HIPAA course print.docx" --no-images   <- text only
     python course_print_to_ppt.py            <- opens a file picker
     or drag a .docx onto this script in File Explorer
 
@@ -526,9 +527,7 @@ def _render_screen(prs, spec, accent, course_title, idx, total):
                          "No screenshot or text for this screen in the course print")
     else:
         # always the screenshot on the left with the text panel beside it
-        _panel_text(s, px, py, pw, ph,
-                    lines or [("more", "No narration or on-screen text for this screen.")],
-                    accent, spec.more)
+        _panel_text(s, px, py, pw, ph, lines or [("more", NO_TEXT)], accent, spec.more)
         img_box = (MARGIN, py, IMG_W, ph)
         try:
             pic = _add_picture(s, spec.image[0], *img_box)
@@ -537,6 +536,7 @@ def _render_screen(prs, spec, accent, course_title, idx, total):
             _placeholder(s, *img_box, f"Image could not be placed ({type(e).__name__})")
 
 
+NO_TEXT = "No narration or on-screen text for this screen."
 IMG_W, GAP = Inches(7.7), Inches(0.3)
 PANEL_PAD = Inches(0.2)
 
@@ -610,11 +610,23 @@ def build_deck(cp: CoursePrint, out_path: str, accent: str = DEFAULT_ACCENT,
     }
 
 
+def _strip_images(cp: CoursePrint) -> None:
+    """Drop the screenshots for a text-only deck."""
+    for n in cp.nodes:
+        had = n.has_content
+        n.images = []
+        if had and not n.has_content:      # screenshot-only screen: keep the slide
+            n.blocks.append(Block("more", NO_TEXT))
+
+
 def convert(docx_path: str, out_path: Optional[str] = None, accent: str = DEFAULT_ACCENT,
-            progress: Optional[Callable[[int, int], None]] = None) -> dict:
+            progress: Optional[Callable[[int, int], None]] = None,
+            images: bool = True) -> dict:
     """Convert a course print .docx to .pptx. Returns a summary dict."""
     out_path = out_path or os.path.splitext(docx_path)[0] + ".pptx"
     cp = parse_course_print(docx_path)
+    if not images:
+        _strip_images(cp)
     summary = build_deck(cp, out_path, accent=accent, progress=progress)
     summary["title"] = cp.title
     return summary
@@ -640,6 +652,7 @@ def main(argv=None):
     ap.add_argument("docx", nargs="?", help="course print .docx (omit to pick a file)")
     ap.add_argument("-o", "--out", default=None,
                     help="output .pptx (default: same name, next to the .docx)")
+    ap.add_argument("--no-images", action="store_true", help="leave the screenshots out (text only)")
     a = ap.parse_args(argv)
     interactive = a.docx is None
     src = a.docx or _pick_file()
@@ -658,7 +671,7 @@ def main(argv=None):
                 print(f"  slide {i} of {n}")
 
         try:
-            s = convert(src, out, DEFAULT_ACCENT, progress=prog)
+            s = convert(src, out, DEFAULT_ACCENT, progress=prog, images=not a.no_images)
         except PermissionError:
             print(f"Couldn't write {out} - is it open in PowerPoint? Close it and try again.")
             return 1

@@ -280,6 +280,9 @@ def test_three_lists_sorted_by_name_output_as_numbers():
     assert cc.format_numbers(r.to_add) == "11594, 11564"
     assert cc.format_numbers(r.archive_remove) == "10922, 10136"
     assert cc.format_numbers(r.archive_reset) == "10983, 10781"
+    assert [c.name for c in cc.final_courses(r)] == [
+        "Anti-Phishing Essentials 11594", "GDPR Essentials 10983",
+        "Slay The Scam 10781", "Spot the Vish 11564"]
 
 
 def test_reset_list_uses_portal_names():

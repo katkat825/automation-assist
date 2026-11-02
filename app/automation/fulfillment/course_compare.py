@@ -758,3 +758,10 @@ def compare(pdf_courses: Iterable[Course], portal_courses: Iterable[Course],
         review=review,
         possible_replacements=replacements,
     )
+
+
+def final_courses(r: Comparison) -> list[Course]:
+    """What the portal will have once the lists are done: the adds plus the
+    archive-and-resets (including portal-only courses kept by hand), by name.
+    Review items aren't included; they haven't been placed."""
+    return _sort_by_name(r.to_add + r.archive_reset)

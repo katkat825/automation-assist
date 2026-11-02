@@ -162,3 +162,17 @@ def test_bad_accent_rejected():
     except ValueError:
         return
     raise AssertionError("expected ValueError")
+
+
+def test_no_images_option():
+    d = tempfile.mkdtemp()
+    src = os.path.join(d, "print.docx")
+    _make_print(src)
+    s = d2p.convert(src, images=False)
+    prs = Presentation(s["out"])
+    assert s["images"] == 0
+    assert not any(sh.shape_type == 13 for sl in prs.slides for sh in sl.shapes)
+    # the two views of screen one collapse into one text slide
+    assert s["slides"] == 6
+    assert "Narration for screen one." in _slide_text(prs.slides[3])
+    assert "Layer text." in _slide_text(prs.slides[4])

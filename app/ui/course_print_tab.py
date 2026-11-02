@@ -16,7 +16,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
-    QColorDialog, QFileDialog, QGroupBox, QHBoxLayout, QLabel,
+    QCheckBox, QColorDialog, QFileDialog, QGroupBox, QHBoxLayout, QLabel,
     QLineEdit, QMessageBox, QProgressBar, QPushButton, QVBoxLayout, QWidget,
 )
 
@@ -99,6 +99,13 @@ class CoursePrintTab(QWidget):
         self._color_btn.clicked.connect(self._pick_color)
         self._paint_color_btn()
         row.addWidget(self._color_btn)
+        row.addSpacing(16)
+        self._images_chk = QCheckBox("Include screenshots")
+        self._images_chk.setChecked(True)
+        self._images_chk.setToolTip(
+            "Unticked: a text-only deck. Each screen becomes one full-width slide with its\n"
+            "narration, feedback and answer choices; a much smaller file.")
+        row.addWidget(self._images_chk)
         row.addStretch()
         g.addLayout(row)
 
@@ -198,10 +205,12 @@ class CoursePrintTab(QWidget):
         self._progress.show()
         self._status.setText("Reading the course print…")
         sig, accent = self._signals, self._accent
+        images = self._images_chk.isChecked()
+        self._images_used = images
 
         def work():
             try:
-                summary = d2p.convert(src, out, accent=accent,
+                summary = d2p.convert(src, out, accent=accent, images=images,
                                       progress=lambda i, n: sig.progress.emit(i, n))
                 sig.finished.emit(summary)
             except PermissionError:
@@ -225,7 +234,7 @@ class CoursePrintTab(QWidget):
         self._open_btn.setEnabled(True)
         self._folder_btn.setEnabled(True)
         extra = ""
-        if s["text_only"]:
+        if s["text_only"] and self._images_used:
             extra = (f"  {s['text_only']} screen(s) had no screenshot and were laid out as "
                      "text — capture shots on your QA pass to fill them in.")
         self._status.setText(

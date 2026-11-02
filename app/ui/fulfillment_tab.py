@@ -63,6 +63,8 @@ _RTABLE_STYLE = (
     "QTableWidget::item:selected { background: #0b5ed7; color: white; }"
 )
 
+_FINAL_TITLE = "Final course list"
+
 _BTN = (
     "QPushButton { background: #6c757d; color: white; border-radius: 4px; padding: 0 12px; }"
     "QPushButton:hover { background: #5a6268; }"
@@ -297,6 +299,25 @@ class FulfillmentTab(QWidget):
             layout.addWidget(group)
             self._outputs[key] = (label, field)
             label.setProperty("title", title)
+
+        # Final course list: comma-separated, so it pastes into a single Excel cell.
+        final_group = QGroupBox()
+        fg = QVBoxLayout(final_group)
+        self._final_label = QLabel(f"<b>{_FINAL_TITLE}</b>")
+        fg.addWidget(self._final_label)
+        self._final = QPlainTextEdit()
+        self._final.setReadOnly(True)
+        self._final.setStyleSheet("font-family: Consolas, monospace;")
+        self._final.setMaximumHeight(100)
+        self._final.setPlaceholderText("Every course the portal will have after the adds and "
+                                       "archives, comma-separated.")
+        fg.addWidget(self._final)
+        row = QHBoxLayout()
+        row.addStretch()
+        row.addWidget(self._button(
+            "Copy", lambda _=False: QApplication.clipboard().setText(self._final.toPlainText())))
+        fg.addLayout(row)
+        layout.addWidget(final_group)
 
         details_group = QGroupBox("Details")
         dg = QVBoxLayout(details_group)
@@ -674,6 +695,9 @@ class FulfillmentTab(QWidget):
                 label.setText(f"<b>{label.property('title')}</b> ({len(courses)})")
                 field.setText(cc.format_numbers(courses))
                 field.setCursorPosition(0)
+            final = cc.final_courses(result)
+            self._final_label.setText(f"<b>{_FINAL_TITLE}</b> ({len(final)})")
+            self._final.setPlainText(", ".join(c.name for c in final))
             self._details.setHtml(self._details_html(result, len(portal.courses), keep))
 
         self._tasks_view.show_plan(ft.build_plan(check, result))
@@ -728,6 +752,8 @@ class FulfillmentTab(QWidget):
         for label, field in self._outputs.values():
             label.setText(f"<b>{label.property('title')}</b>")
             field.clear()
+        self._final_label.setText(f"<b>{_FINAL_TITLE}</b>")
+        self._final.clear()
 
     def _on_clear_all(self):
         self._pdf_list.clear()
