@@ -25,6 +25,10 @@ _STUB_SRC = os.path.join("app", "automation", "scorm", "runtime", "scorm_stub.js
 _STUB_DEST = os.path.join("app", "automation", "scorm", "runtime")
 # PyInstaller's --add-data separator is ';' on Windows, ':' elsewhere.
 _SEP = ";" if os.name == "nt" else ":"
+# App icon: embedded in the .exe (--icon) and bundled as data so the running
+# app can set it on its windows / taskbar entry.
+_ICON = os.path.join("app", "assets", "automation_assist.ico")
+_ICON_DEST = os.path.join("app", "assets")
 
 PyInstaller.__main__.run([
     "main.py",
@@ -32,6 +36,8 @@ PyInstaller.__main__.run([
     "--onefile",
     "--windowed",
     "--noconfirm",
+    f"--icon={_ICON}",
+    f"--add-data={_ICON}{_SEP}{_ICON_DEST}",
     # PySide6 plugins PyInstaller sometimes misses
     "--hidden-import=PySide6.QtSvg",
     "--hidden-import=PySide6.QtNetwork",

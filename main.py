@@ -14,6 +14,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon
 
 from app.paths import DATA_DIR, SETTINGS_FILE, DB_FILE
 from app.ui.main_window import MainWindow
@@ -47,15 +48,39 @@ def _migrate_data_files():
             shutil.copy2(src, dst)
 
 
+def _app_icon() -> QIcon:
+    """Load the app icon (taskbar / title bar / tray). Works from source and
+    from the PyInstaller bundle, where data files live under sys._MEIPASS."""
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+    return QIcon(str(base / "app" / "assets" / "automation_assist.ico"))
+
+
+def _set_windows_app_id():
+    """Give the process its own taskbar identity so Windows shows our icon
+    instead of python.exe's when running from source."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "Local.AutomationAssist"
+        )
+    except Exception:
+        pass
+
+
 def main():
     # High-DPI support
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
 
+    _set_windows_app_id()
+
     app = QApplication(sys.argv)
     app.setApplicationName("Automation Assist")
     app.setOrganizationName("Local")
+    app.setWindowIcon(_app_icon())
 
     # Point Playwright at its browser binaries (needed for bundled exe)
     _ensure_playwright_browsers()
