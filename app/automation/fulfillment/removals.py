@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import Iterable, Optional
 
 from . import course_compare as cc
 from . import order_check as oc
@@ -100,6 +100,31 @@ def change_notes(pdfs: Iterable[cc.ParseResult]) -> list[ChangeNote]:
     return out
 
 
+# "All other courses will remain", "existing courseware stays the same", ...
+_KEEP_EXISTING_RE = re.compile(
+    r"\b(?:all\s+other|remaining|existing|current)\s+(?:courses?|courseware|content|titles?)\b"
+    r"[^.\n]{0,40}?\b(?:remain\w*|stay\w*|continu\w*|unchanged|the\s+same)\b", re.I)
+
+
+_KEEP_CHANGE_RE = re.compile(
+    r"\b(?:upgrad\w*|replac\w*|swap\w*|switch\w*|migrat\w*|in\s+place\s+of|instead\s+of)\b[^.\n]{0,60}",
+    re.I)
+
+
+def keep_existing_reasons(notes: list[ChangeNote], pdfs: Iterable[cc.ParseResult]) -> list[str]:
+    """Signs, before the portal list is in, that the PDF only lists what's
+    changing and every other course stays. Empty = no sign either way."""
+    # Stricter than _CHANGE_WORDS_RE: "periodic updates" in a support plan isn't a sign.
+    reasons = [f'{n.label}: "{m.group(0)}"' for n in notes if n.kind == UPGRADE
+               for m in [_KEEP_CHANGE_RE.search(n.text)] if m][:1]
+    for p in pdfs:
+        m = _KEEP_EXISTING_RE.search(p.text)
+        if m:
+            reasons.append(f'{p.source}: "{cc.clean_text(m.group(0))}".')
+            break
+    return reasons
+
+
 def _keywords(text: str) -> set[str]:
     words = re.findall(r"[A-Za-z][A-Za-z0-9+#]*|\d{4,}", text)
     return {w.casefold() for w in words
@@ -119,7 +144,9 @@ def _match_text(notes: list[ChangeNote]) -> list[str]:
 
 
 def plan_removals(pdf_courses: Iterable[cc.Course], portal_courses: Iterable[cc.Course],
-                  notes: list[ChangeNote]) -> RemovalPlan:
+                  notes: list[ChangeNote], keep_existing: Optional[bool] = None) -> RemovalPlan:
+    """``keep_existing``: the Order details step's "Keep existing courses" box.
+    True = the PDF only lists changes; False = it's the full list; None = guess."""
     pdf_numbers = {c.number for c in pdf_courses}
     portal = list(portal_courses)
     plan = RemovalPlan(candidates=sorted(
@@ -160,6 +187,12 @@ def plan_removals(pdf_courses: Iterable[cc.Course], portal_courses: Iterable[cc.
         plan.reasons.append(f"Only {len(pdf_numbers & {c.number for c in portal})} of the "
                             f"{len(portal)} portal courses are on the PDF.")
     plan.partial = bool(plan.reasons)
+    if keep_existing is not None:
+        if plan.partial and not keep_existing:
+            plan.warnings.append("Keep existing courses is unticked, but this looks like a change "
+                                 "order: " + " ".join(plan.reasons))
+        plan.partial = keep_existing
+        plan.reasons = ["Keep existing courses is ticked."] if keep_existing else []
 
     plan.ticked = ({n for n in plan.suggested if n in named} if plan.partial
                    else set(candidate_numbers))

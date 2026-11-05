@@ -38,7 +38,8 @@ EMAIL_FIELDS = (
     ("company", "Company", r"\bcompany\b"),
     ("billing_poc", "Billing POC", r"\bbilling\b"),
     ("training_poc", "Training POC", r"\b(?:admin|training)\s+poc\b"),
-    ("license_dates", "License dates", r"\blicense\s+dates?\b"),
+    # "License Dates", or "Term" / "License Term" / "Term Dates" in some emails.
+    ("license_dates", "License dates", r"\blicense\s+(?:dates?|term)\b|^term(?:\s+dates?)?$"),
 )
 _EMAIL_LABELS = {key: label for key, label, _ in EMAIL_FIELDS}
 
@@ -95,7 +96,8 @@ PORTAL_DOMAIN = "glsondemand.com"
 
 # "CL-SST-ESS", "DL-LMS1", "CL-9282-CG"; may follow a colon with no space
 # ("Related Services:DL-LMS1").
-_SKU_RE = re.compile(r"(?<![\w-])([A-Z]{2,}(?:-[A-Z0-9]+)+)(?![\w-])")
+# "CL-BD_CUST" (16849) has an underscore part.
+_SKU_RE = re.compile(r"(?<![\w-])([A-Z]{2,}(?:-[A-Z0-9]+(?:_[A-Z0-9]+)*)+)(?![\w-])")
 _SKU_HEADER_RE = re.compile(r"^(?:SKU|ACTIVITY)$", re.I)          # SOW / estimate
 _USERS_HEADER_RE = re.compile(r"\busers\b|\blicense\s+count\b", re.I)
 _DESCRIPTION_HEADER_RE = re.compile(r"^description$", re.I)
@@ -110,9 +112,17 @@ _RENEWAL_TITLE_RE = re.compile(r"\bRENEWAL\s+(?:PROPOSAL|INVOICE)\b")
 # Estimate note "New Client", or the new-client Organization Information form in the SOW.
 _NEW_ACCOUNT_RE = re.compile(r"\bNew Client\b|\bORGANIZATION INFORMATION\b")
 
+PHISHFIREWALL_RE = re.compile(r"\bPhish\s*Firewall\b", re.I)
 _COMMS_TOOLBOX_RE = re.compile(r"\bCommunications?\s+Tool(?:box|kit)\b", re.I)
 
 GLS_HOSTED, SELF_HOSTED = "GLS-Hosted", "Self-Hosted"
+PHISHFIREWALL_HOSTED = "PhishFirewall-Hosted"   # PhishFirewall runs both phishing and the LMS
+ORDER_TYPES = (RENEWAL, NEW_ACCOUNT)
+HOSTING_OPTIONS = (GLS_HOSTED, SELF_HOSTED, PHISHFIREWALL_HOSTED)
+# No SOW standard for PhishFirewall orders yet. 16849 (West Michigan) only says
+# "AI-Managed Phishing", so that wording counts as a sign too.
+_PHISHFIREWALL_HOSTING_RE = re.compile(r"\bPhish\s*Firewall\b|\bAI[- ](?:Agent[- ])?Managed\s+Phishing\b", re.I)
+CHOSEN = "your choice (Order details)"
 HOSTING_SKU_PREFIXES = ("DL-LMS",)   # OnDemand hosting
 SCORM_SKU_PREFIXES = ("DL-SCR",)     # SCORM delivery = the client hosts it
 
@@ -211,15 +221,24 @@ class OrderCheck:
     portal_users: Optional[int] = None   # license count on the pasted portal list
     company: str = ""                    # email Full Company Name, else SOW Prepared for
     portal_url: str = ""                 # normalised: email URL/OD, else estimate OD URL
-    hosting: str = ""                    # GLS_HOSTED / SELF_HOSTED / "" (not detected)
+    hosting: str = ""                    # one of HOSTING_OPTIONS / "" (not detected)
+    # What the PDFs showed before any choice in the Order details step, and why.
+    detected_order_type: str = ""
+    order_type_source: str = ""
+    detected_hosting: str = ""
+    hosting_source: str = ""
     poc: str = ""                        # email OD Admin POC, else estimate OD POC
     sources: list[str] = field(default_factory=list)   # PDF names, attached to tickets
     estimate_sources: list[str] = field(default_factory=list)  # SKUs here were actually bought
     has_comms_toolbox: bool = False      # the SOW lists the Communications Toolbox
+    has_phishfirewall: bool = False      # "PhishFirewall" appears in the SOW or estimate
 
 
 def check_order(email_text: str, pdfs: Iterable[cc.ParseResult],
-                portal: Optional[cc.ParseResult] = None) -> OrderCheck:
+                portal: Optional[cc.ParseResult] = None,
+                order_type: str = "", hosting: str = "") -> OrderCheck:
+    """``order_type`` / ``hosting``: chosen by hand in the Order details step;
+    they replace what was detected."""
     pdfs = list(pdfs)
     email = parse_order_email(email_text)
     out = OrderCheck(email=email, sources=[p.source for p in pdfs if p.source])
@@ -229,6 +248,8 @@ def check_order(email_text: str, pdfs: Iterable[cc.ParseResult],
         by_kind[document_kind(p.text)].append(p)
     out.estimate_sources = [p.source for p in by_kind[ESTIMATE]]
     out.has_comms_toolbox = any(_COMMS_TOOLBOX_RE.search(p.text) for p in by_kind[SOW])
+    out.has_phishfirewall = any(PHISHFIREWALL_RE.search(p.text)
+                                for p in by_kind[SOW] + by_kind[ESTIMATE])
 
     # -- what's missing --------------------------------------------------
     if not email_text.strip():
@@ -251,10 +272,17 @@ def check_order(email_text: str, pdfs: Iterable[cc.ParseResult],
         out.order_number = out.order_number or m.group(1)
         out.facts.append(Fact("Order number", m.group(1), p.source))
     for kind, pattern in ((RENEWAL, _RENEWAL_TITLE_RE), (NEW_ACCOUNT, _NEW_ACCOUNT_RE)):
-        src = next((p.source for p in by_kind[SOW] + by_kind[ESTIMATE] if pattern.search(p.text)), None)
+        hit = next(((p.source, m.group(0)) for p in by_kind[SOW] + by_kind[ESTIMATE]
+                    for m in [pattern.search(p.text)] if m), None)
+        src = hit[0] if hit else None
         if src and not out.order_type:
             out.order_type = kind
+            out.order_type_source = f'"{hit[1]}" in {src}'
             out.facts.append(Fact("Order type", kind, src))
+    out.detected_order_type = out.order_type
+    if order_type and order_type != out.order_type:
+        out.order_type = order_type
+        out.facts.append(Fact("Order type", order_type, CHOSEN))
     for key, label in _EMAIL_LABELS.items():
         if email.fields.get(key):
             out.facts.append(Fact(label, email.fields[key], "Order email"))
@@ -279,9 +307,16 @@ def check_order(email_text: str, pdfs: Iterable[cc.ParseResult],
         out.skus.extend(sku_lines(p.tables, p.source))
     for p in by_kind[SOW]:
         out.archive.extend(archive_rows(p.tables))
-    out.hosting = _hosting(out.skus, out.portal_url, [u for _, u, _ in contacts])
+    pfw_text = next((m.group(0) for p in by_kind[SOW] + by_kind[ESTIMATE] + by_kind[UNKNOWN]
+                     for m in [_PHISHFIREWALL_HOSTING_RE.search(p.text)] if m), "")
+    out.hosting, out.hosting_source = _hosting(out.skus, out.portal_url,
+                                               [u for _, u, _ in contacts], pfw_text)
+    out.detected_hosting = out.hosting
     if out.hosting:
-        out.facts.append(Fact("Hosting", out.hosting, "SKUs / OD URL"))
+        out.facts.append(Fact("Hosting", out.hosting, out.hosting_source))
+    if hosting and hosting != out.hosting:
+        out.hosting = hosting
+        out.facts.append(Fact("Hosting", hosting, CHOSEN))
 
     # -- expiration date: the email's License Dates join the PDFs' terms --
     email_dates, _ = cc.find_expiration_dates(email_text, "Order email")
@@ -364,13 +399,20 @@ def portal_url(value: str) -> str:
     return v if "." in v else f"{v}.{PORTAL_DOMAIN}"
 
 
-def _hosting(skus: list[SkuLine], url: str, od_urls: list[str]) -> str:
-    if url or any(s.sku.startswith(HOSTING_SKU_PREFIXES) for s in skus):
-        return GLS_HOSTED
-    if (any(s.sku.startswith(SCORM_SKU_PREFIXES) for s in skus)
-            or any(re.search(r"\bscorm\b", u, re.I) for u in od_urls)):
-        return SELF_HOSTED
-    return ""
+def _hosting(skus: list[SkuLine], url: str, od_urls: list[str],
+             phishfirewall_text: str = "") -> tuple[str, str]:
+    """(hosting, why). An OnDemand URL or hosting SKU wins over everything else."""
+    lms = next((s.sku for s in skus if s.sku.startswith(HOSTING_SKU_PREFIXES)), "")
+    if url or lms:
+        return GLS_HOSTED, (f"{lms} SKU" if lms else f"portal URL {url}")
+    if phishfirewall_text:
+        return PHISHFIREWALL_HOSTED, f'"{phishfirewall_text}" in the PDF, and no OnDemand hosting SKU'
+    scorm = next((s.sku for s in skus if s.sku.startswith(SCORM_SKU_PREFIXES)), "")
+    if scorm:
+        return SELF_HOSTED, f"{scorm} SKU"
+    if any(re.search(r"\bscorm\b", u, re.I) for u in od_urls):
+        return SELF_HOSTED, "estimate OD URL says SCORM"
+    return "", ""
 
 
 def _names_overlap(a: str, b: str) -> bool:

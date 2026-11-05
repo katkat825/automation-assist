@@ -63,6 +63,12 @@ _PREFIX_NUM_RE = re.compile(rf"{_NOT_BEFORE}({_NUM}):\s+\S")
 _SKU_RE = re.compile(rf"\bCL-({_NUM})-[A-Z0-9]+\s*[-–—]\s*(.+)$")
 # "CyberEssentials: Principles of Cybersecurity 11569P (includes" + wrapped ")"
 _NUM_THEN_PAREN_RE = re.compile(rf"{_NOT_BEFORE}({_NUM})\s+\((.*)$")
+# Numbered list with the number in brackets at the end (16849 West Michigan):
+# "1. CyberEssentials: Principles of Cybersecurity (11412P)". Up to 6 digits and
+# an unclosed bracket are accepted here so the PDF's typos ("(108671)",
+# "(115420") can be flagged instead of silently skipped.
+_PAREN_NUM_RE = re.compile(r"\((\d{4,6}[A-Za-z]{0,4})\)?$")
+_LIST_ITEM_RE = re.compile(r"(?:^|\s)\d{1,2}\.\s+(?=\S)")
 # Any number-like token, for the "couldn't read this line" safety net.
 _ANY_NUM_RE = re.compile(rf"{_NOT_BEFORE}\b({_NUM})\b(?![/.,]\d)")
 
@@ -90,6 +96,8 @@ _ADDRESS_RE = re.compile(r"\b[A-Z]{2},? \d{5}(?:-\d{4})?\b")
 # The same, needing the punctuation after the city ("Fairfax, VA 22033", "Fairfax. VA
 # 22033") so "Generative AI 11233" isn't one.
 _POSTCODE_RE = re.compile(r"[,.]\s*[A-Z]{2},?\s+\d{5}(?:-\d{4})?\b")
+
+_UNREAD_REASON = "Mentions a number but couldn't be read as a course. Check the PDF."
 
 _MAX_WRAP_LINES = 3  # longest a course name realistically wraps
 
@@ -150,6 +158,9 @@ class Comparison:
     # (pdf course being added, portal course being removed) whose names are
     # near-identical — usually a renumbered/updated version of the same course.
     possible_replacements: list[tuple[Course, Course]]
+    # Portal-only courses on a demo license: removed by Fulfillment, not part
+    # of the archive ticket.
+    demo_remove: list[Course] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -396,6 +407,10 @@ class _ColumnReader:
         if _POSTCODE_RE.search(name):
             return  # a postcode ("Fairfax, VA 22033"), not a course
         if number in self.found:
+            other = self.found[number]
+            if not is_year_like(number) and name_key(other.name) != name_key(name):
+                self.result.review.append(ReviewItem(name, self.source,
+                    f"Same number as {other.name}. One of them is probably a typo in the PDF."))
             return  # listed twice in the proposal (it happens)
         if is_year_like(number) and _DATE_TAIL_RE.search(name):
             return  # a date, not a course
@@ -420,8 +435,7 @@ class _ColumnReader:
             text = " ".join(self.buffer)
             nums = [n for n in _ANY_NUM_RE.findall(text) if not is_year_like(n)]
             if nums and not _ADDRESS_RE.search(text):
-                self.result.review.append(ReviewItem(text, self.source,
-                    "Mentions a number but couldn't be read as a course. Check the PDF."))
+                self.result.review.append(ReviewItem(text, self.source, _UNREAD_REASON))
         self.buffer = []
         self.pending_paren = False
 
@@ -477,6 +491,12 @@ class _ColumnReader:
             self._emit(m.group(1), name, note)
             return
 
+        m = _PAREN_NUM_RE.search(body)
+        if m:
+            self._paren_item(" ".join(self.buffer + [body[:m.start()]]), m.group(1), m.group(0), note)
+            self.buffer = []
+            return
+
         m = _NUM_THEN_PAREN_RE.search(body)
         if m:
             name = " ".join(self.buffer + [body[:m.end(1)]])
@@ -489,6 +509,17 @@ class _ColumnReader:
         self.buffer.append(text)
         if len(self.buffer) > _MAX_WRAP_LINES:
             self.buffer.pop(0)
+
+    def _paren_item(self, text: str, number: str, raw: str, note: str) -> None:
+        """'1. Anti-Phishing Essentials' + '11594' -> 'Anti-Phishing Essentials 11594'.
+        Only the last list item in the joined lines is the course."""
+        name = _LIST_ITEM_RE.split(text)[-1].strip()
+        digits = re.match(r"\d+", number).group(0)
+        if len(digits) > 5 or not raw.endswith(")"):
+            self.result.review.append(ReviewItem(f"{name} {raw}", self.source,
+                f"Course number looks mistyped: {raw}. Probably {digits[:5]}; check the PDF."))
+            return
+        self._emit(number, f"{name} {number}", note)
 
     @staticmethod
     def _strip_trailing_tag(text: str) -> tuple[str, str]:
@@ -527,7 +558,7 @@ def extract_courses_from_words(pages: list[list[dict]], source: str) -> ParseRes
     kept = []
     for r in result.review:
         nums = {n.upper() for n in _ANY_NUM_RE.findall(r.text) if not is_year_like(n)}
-        if nums and nums <= set(found):
+        if r.reason.startswith(_UNREAD_REASON[:24]) and nums and nums <= set(found):
             continue
         kept.append(r)
     result.review = kept
@@ -541,9 +572,9 @@ def extract_courses_from_words(pages: list[list[dict]], source: str) -> ParseRes
 _DATE = r"\d{1,2}\s*[/-]\s*\d{1,2}\s*[/-]\s*\d{2,4}"
 # "License Term: 9/29/2026-9/28/2027", "License Term: 8/20/2026 to 8/19/2027",
 # "Renewal PD: 9/29/2026-9/28/2027", "License Dates: 10/18/2026-10/17/2027"
-# (Order Info email) -> the END of the term.
+# "Term: 10/18/2026-10/17/2027" (Order Info email) -> the END of the term.
 _TERM_RE = re.compile(
-    rf"(?:License\s+Term|License\s+Dates?|Renewal\s+PD|License\s+Period|Term\s+Dates?)\s*:?\s*"
+    rf"(?:License\s+Term|License\s+Dates?|Renewal\s+PD|License\s+Period|Term(?:\s+Dates?)?)\s*:?\s*"
     rf"({_DATE})\s*(?:-|–|—|to|through|thru)\s*({_DATE})",
     re.IGNORECASE,
 )
@@ -649,6 +680,12 @@ def add_sku_table_courses(result: ParseResult, tables: Iterable[list[list[str]]]
     The description next to it is free text, so the word reader can't pick the
     number out of it; the SKU cell itself is unambiguous.
     """
+    # A bare number read from a pricing table's users column ("3768") is a user
+    # count, not a course. (A bare number elsewhere can be a wrapped course number.)
+    counts = {clean_text(row[i]) for table in tables if table
+              for i, h in enumerate(table[0]) if re.search(r"\busers\b|license\s+count", clean_text(h or ""), re.I)
+              for row in table[1:] if i < len(row) and row[i]}
+    result.courses = [c for c in result.courses if not (c.name == c.number and c.number in counts)]
     found = {c.number for c in result.courses}
     for table in tables:
         header = [clean_text(h) for h in (table[0] if table else [])]
@@ -673,7 +710,7 @@ def add_sku_table_courses(result: ParseResult, tables: Iterable[list[list[str]]]
     kept = []
     for r in result.review:
         nums = {n.upper() for n in _ANY_NUM_RE.findall(r.text) if not is_year_like(n)}
-        if nums and nums <= found:
+        if r.reason.startswith(_UNREAD_REASON[:24]) and nums and nums <= found:
             continue
         kept.append(r)
     result.review = kept
@@ -716,7 +753,7 @@ def compare(pdf_courses: Iterable[Course], portal_courses: Iterable[Course],
     portal_by = {c.number: c for c in portal_courses}
     review = list(review)
 
-    to_add, remove, reset = [], [], []
+    to_add, remove, reset, demo = [], [], [], []
 
     for num, c in pdf_by.items():
         if num in portal_by:
@@ -736,7 +773,12 @@ def compare(pdf_courses: Iterable[Course], portal_courses: Iterable[Course],
     for num, c in portal_by.items():
         if num in pdf_by:
             continue
-        (reset if num in keep else remove).append(c)
+        if num in keep:
+            reset.append(c)
+        elif c.license_count == DEMO_LICENSE_COUNT:
+            demo.append(c)
+        else:
+            remove.append(c)
 
     replacements = []
     for a in to_add:
@@ -757,6 +799,7 @@ def compare(pdf_courses: Iterable[Course], portal_courses: Iterable[Course],
         archive_reset=_sort_by_name(reset),
         review=review,
         possible_replacements=replacements,
+        demo_remove=_sort_by_name(demo),
     )
 
 

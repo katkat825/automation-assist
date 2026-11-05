@@ -194,3 +194,8 @@ def test_missing_inputs_are_warned():
     assert "missing: Opp name, Company" in text
     assert "No PandaDoc SOW" in text and "No QuickBooks estimate" in text
     assert "No Order Info email" in " ".join(oc.check_order("", []).warnings)
+
+
+def test_sku_with_underscore_part():
+    table = [["SKU", "Description", "Total Users"], ["CL-BD_CUST", "AI-Managed Phishing", "3768"]]
+    assert [(s.sku, s.users) for s in oc.sku_lines([table], "sow.pdf")] == [("CL-BD_CUST", 3768)]

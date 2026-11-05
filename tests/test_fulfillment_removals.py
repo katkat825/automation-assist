@@ -132,3 +132,26 @@ def test_compare_keeps_unticked_portal_only_courses_as_archive_and_reset():
     assert [c.number for c in result.to_add] == ["11570"]
     assert sorted(c.number for c in result.archive_remove) == ["10133", "10134", "10736"]
     assert {c.number for c in result.archive_reset} == keep
+
+
+
+def test_keep_existing_choice_overrides_the_guess():
+    portal = [cc.Course(n, f"Course {n}") for n in ("10001", "10002", "10003")]
+    pdf = [cc.Course("10001", "Course 10001"), cc.Course("10002", "Course 10002")]
+    full = rm.plan_removals(pdf, portal, [])
+    assert not full.partial and full.ticked == {"10003"}
+    kept = rm.plan_removals(pdf, portal, [], keep_existing=True)
+    assert kept.partial and kept.ticked == set()
+
+
+def test_keep_existing_unticked_on_a_change_order_warns():
+    portal = [cc.Course(n, f"Course {n}") for n in ("10001", "10002", "10003")]
+    plan = rm.plan_removals([cc.Course("10001", "Course 10001")], portal, [], keep_existing=False)
+    assert not plan.partial and plan.ticked == {"10002", "10003"}
+    assert any("looks like a change order" in w for w in plan.warnings)
+
+
+def test_keep_existing_reasons_from_pdf_text():
+    pdf = cc.ParseResult(source="sow.pdf", text="All other courses will remain the same for the term.")
+    assert rm.keep_existing_reasons([], [pdf]) == ['sow.pdf: "All other courses will remain".']
+    assert rm.keep_existing_reasons([], [cc.ParseResult(source="x", text="Renewal")]) == []

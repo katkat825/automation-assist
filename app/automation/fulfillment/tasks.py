@@ -5,13 +5,14 @@ Built from the order check (order_check.check_order) and, once the portal list
 is pasted, the course comparison (course_compare.compare). Tasks that become a
 BoldDesk ticket carry its text (tickets.py). Who handles what:
 
-    Fulfillment             portal exp date, course adds, SecurePhish,
-                            customer communication (a BoldDesk ticket)
-    Support/T1 (BoldDesk)   license count, course archive, SSO, SCORM,
-                            communication materials
+    Fulfillment             portal exp date, course adds, demo course
+                            removals, phishing (PhishingBox),
+                            customer notification (a BoldDesk ticket)
+    Support/T1 (BoldDesk)   license count, course archive, SSO (unless it's
+                            already in place), SCORM, communication materials
     Customization (Monday)  customization, incl. PA screens
 
-SKU-driven tasks (SSO, SCORM, customization, SecurePhish) use the estimate's
+SKU-driven tasks (SSO, SCORM, customization, phishing) use the estimate's
 line when there is one: it's what was bought, and its wording is what goes in
 the ticket. A SKU only on the SOW (an optional item) is flagged to confirm.
 
@@ -21,6 +22,7 @@ Not generated: portal creation (no example yet).
 from __future__ import annotations
 
 import difflib
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -39,7 +41,11 @@ CUSTOMIZATION = "Customization (Monday)"
 
 SSO_SKUS = ("DL-SSO",)
 CUSTOMIZATION_SKUS = ("SRV-CUS",)
-SECUREPHISH_SKUS = ("PH-SAAS",)
+PHISHING_SKUS = ("PH-",)
+# "PH-SAAS1-PB" / "PH-SAAS-PB": PhishingBox (sold as SecurePhish).
+_PHISHINGBOX_RE = re.compile(r"-PB$|\bSecurePhish", re.I)
+# "In place." on the SKU line = already set up; "not yet in place" isn't.
+_IN_PLACE_RE = re.compile(r"(?<!not\s)(?<!yet\s)\bin\s+place\b", re.I)
 
 
 @dataclass(frozen=True)
@@ -66,13 +72,15 @@ def build_plan(check: oc.OrderCheck, comparison: Optional[cc.Comparison]) -> Tas
         plan.header.append("Course tasks will appear once the SOW courses and portal list are both in.")
     add = plan.tasks.append
 
+    pfw = check.hosting == oc.PHISHFIREWALL_HOSTED
     if check.hosting != oc.SELF_HOSTED:
-        if check.exp.date:
-            add(Task("Update portal expiration date", FULFILLMENT,
-                     (f"{check.portal_url or 'Portal'}: {check.exp.date}",)))
-        else:
-            add(Task("Update portal expiration date", FULFILLMENT,
-                     confirm="No single date found. See the Order tab."))
+        title = "Update PhishFirewall expiration date" if pfw else "Update portal expiration date"
+        where = "PhishFirewall" if pfw else (check.portal_url or "Portal")
+        confirm = "" if check.exp.date else "No single date found. See the Order tab."
+        if pfw:
+            confirm = " ".join(x for x in (_PFW_NO_STANDARD, confirm) if x)
+        add(Task(title, FULFILLMENT, (f"{where}: {check.exp.date}",) if check.exp.date else (),
+                 confirm=confirm))
 
     if (check.sow_users is not None and check.portal_users is not None
             and check.sow_users != check.portal_users):
@@ -82,7 +90,9 @@ def build_plan(check: oc.OrderCheck, comparison: Optional[cc.Comparison]) -> Tas
         plan.tasks.extend(_course_tasks(check, comparison))
 
     sku, on_estimate = _sku(check, SSO_SKUS)
-    if sku:
+    if sku and _in_place(check, SSO_SKUS):
+        plan.header.append(f"SSO is already in place ({sku.sku}), so there's no SSO ticket.")
+    elif sku:
         add(Task("SSO", SUPPORT_TICKET, confirm=_optional(on_estimate), ticket=tk.sso(check, sku)))
     sku, on_estimate = _sku(check, oc.SCORM_SKU_PREFIXES)
     if sku:
@@ -92,10 +102,7 @@ def build_plan(check: oc.OrderCheck, comparison: Optional[cc.Comparison]) -> Tas
     if sku:
         add(Task("Customization", CUSTOMIZATION, (_order_line(check), f"{sku.sku}: {sku.description}"),
                  confirm=_optional(on_estimate)))
-    sku, on_estimate = _sku(check, SECUREPHISH_SKUS)
-    if sku:
-        add(Task("SecurePhish", FULFILLMENT, (f"{sku.sku}: {sku.description}",),
-                 confirm=_optional(on_estimate)))
+    plan.tasks.extend(_phishing_tasks(check))
 
     if check.has_comms_toolbox:
         add(Task("Communication materials", SUPPORT_TICKET, ticket=tk.comms_materials(check)))
@@ -103,21 +110,33 @@ def build_plan(check: oc.OrderCheck, comparison: Optional[cc.Comparison]) -> Tas
         add(Task("Communication materials", SUPPORT_TICKET, ticket=tk.comms_materials(check),
                  confirm="The SOW doesn't list the Communications Toolbox; new accounts get it by default."))
 
-    if check.hosting != oc.SELF_HOSTED:
-        if check.order_type == oc.RENEWAL:
-            add(Task("Customer communication", FULFILLMENT_TICKET,
-                     ticket=tk.customer_notification(check)))
-        else:
-            add(Task("Customer communication", FULFILLMENT_TICKET, (_order_line(check),),
-                     confirm="Only the renewal wording exists so far. Write this one by hand."))
+    if check.order_type == oc.NEW_ACCOUNT and check.hosting:
+        add(Task("Customer notification", FULFILLMENT_TICKET, ticket=tk.welcome(check)))
+    elif check.order_type == oc.NEW_ACCOUNT:
+        add(Task("Customer notification", FULFILLMENT_TICKET, (_order_line(check),),
+                 confirm="Hosting unknown, so no welcome email picked. Choose one in Order details."))
+    elif check.order_type == oc.RENEWAL and check.hosting in (oc.GLS_HOSTED, ""):
+        add(Task("Customer notification", FULFILLMENT_TICKET,
+                 ticket=tk.customer_notification(check)))
+    elif check.order_type == oc.RENEWAL and pfw:
+        add(Task("Customer notification", FULFILLMENT_TICKET, (_order_line(check),),
+                 confirm="No renewal wording for PhishFirewall-hosted yet. Write this one by hand."))
+    elif not check.order_type and check.hosting != oc.SELF_HOSTED:
+        add(Task("Customer notification", FULFILLMENT_TICKET, (_order_line(check),),
+                 confirm="Order type unknown. Choose Renewal or New Account in Order details."))
     return plan
 
 
 def _course_tasks(check: oc.OrderCheck, r: cc.Comparison) -> list[Task]:
     tasks = []
     if r.to_add:
+        count, confirm = _add_license_count(check)
         tasks.append(Task("Add courses", FULFILLMENT,
-                          (cc.format_numbers(r.to_add),) + _course_lines(r.to_add)))
+                          (cc.format_numbers(r.to_add), f"License count: {count}")
+                          + _course_lines(r.to_add), confirm=confirm))
+    if r.demo_remove:
+        tasks.append(Task("Remove demo courses", FULFILLMENT,
+                          (cc.format_numbers(r.demo_remove),) + _course_lines(r.demo_remove)))
 
     requested, assessment, other = "", "", []
     for label, value in check.archive:
@@ -138,11 +157,13 @@ def _course_tasks(check: oc.OrderCheck, r: cc.Comparison) -> list[Task]:
     if r.archive_reset or r.archive_remove or assessment:
         also_remove = [portal_assessment.text if portal_assessment else assessment] if assessment else []
         dated = any(ch.isdigit() for ch in requested)
+        on_sow = bool(check.archive)     # the SOW has a Course Archive section
         tasks.append(Task(
             "Course archive", SUPPORT_TICKET,
-            confirm="" if dated else f"Requested archive date: {requested or 'not on the SOW'}.",
+            confirm="" if dated or on_sow else "Requested archive date: not on the SOW.",
             ticket=tk.archive(check, r.archive_reset, r.archive_remove, also_remove,
-                              requested if dated else "", other)))
+                              requested if dated else "", other,
+                              date_tbd=on_sow and not dated)))
 
     if review:
         tasks.append(Task("Place items the comparison couldn't", FULFILLMENT,
@@ -156,6 +177,50 @@ def _sku(check: oc.OrderCheck, prefixes: tuple[str, ...]) -> tuple[Optional[oc.S
     lines = [s for s in check.skus if s.sku.startswith(prefixes)]
     bought = [s for s in lines if s.source in check.estimate_sources]
     return (bought or lines or [None])[0], bool(bought)
+
+
+def _in_place(check: oc.OrderCheck, prefixes: tuple[str, ...]) -> bool:
+    return any(s.sku.startswith(prefixes) and _IN_PLACE_RE.search(s.description)
+               for s in check.skus)
+
+
+def _phishing_tasks(check: oc.OrderCheck) -> list[Task]:
+    """PhishingBox (PH-SAAS-PB) is Fulfillment's, no ticket. PhishFirewall hasn't
+    come up yet, so it's flagged rather than guessed at."""
+    tasks = []
+    sku, on_estimate = _sku(check, PHISHING_SKUS)
+    lines = [s for s in check.skus if s.sku.startswith(PHISHING_SKUS)]
+    firewall = check.hosting == oc.PHISHFIREWALL_HOSTED or check.has_phishfirewall or any(
+        oc.PHISHFIREWALL_RE.search(f"{s.sku} {s.description}") for s in lines)
+    if sku and any(_PHISHINGBOX_RE.search(s.sku) or _PHISHINGBOX_RE.search(s.description)
+                   for s in lines):
+        tasks.append(Task("Phishing: PhishingBox", FULFILLMENT, (f"{sku.sku}: {sku.description}",),
+                          confirm=_optional(on_estimate)))
+    elif sku and not firewall:
+        tasks.append(Task("Phishing", FULFILLMENT, (f"{sku.sku}: {sku.description}",),
+                          confirm="Phishing SKU that isn't PhishingBox (-PB). Check which product it is."))
+    if firewall:
+        details = (f"{sku.sku}: {sku.description}",) if sku and not tasks else ()
+        tasks.append(Task("Phishing: PhishFirewall", FULFILLMENT, details,
+                          confirm=_PFW_NO_STANDARD if check.hosting == oc.PHISHFIREWALL_HOSTED
+                          else "First PhishFirewall order. Check who handles it and what it needs."))
+    return tasks
+
+
+_PFW_NO_STANDARD = "PhishFirewall-hosted: no standard for these yet. Check what's needed."
+
+
+def _add_license_count(check: oc.OrderCheck) -> tuple[str, str]:
+    """(count for the added courses, why to double-check it). The main package's
+    count; add-on bundles with their own counts are flagged."""
+    if check.sow_users is None:
+        return "[license count?]", ""
+    counts = sorted({s.users for s in check.skus
+                     if s.users is not None and s.sku.startswith(oc.LICENSE_SKU_PREFIXES)}, reverse=True)
+    if len(counts) > 1:
+        return str(check.sow_users), ("License SKUs have different counts ("
+                                      + ", ".join(map(str, counts)) + "). Check which count each course gets.")
+    return str(check.sow_users), ""
 
 
 def _optional(on_estimate: bool) -> str:

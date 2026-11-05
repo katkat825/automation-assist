@@ -3,15 +3,19 @@ Fulfillment tab — order check and renewal course list comparison, as a
 step-by-step wizard (Back / Next, or click a step you've already reached):
 
     1. PDFs      Add the SOW and QuickBooks estimate PDFs. Next reads them.
-    2. Courses   Check the courses pulled from the PDF (layouts vary, so this
+    2. Details   Order type (Renewal / New Account), hosting (GLS-, Self- or
+                 PhishFirewall-Hosted) and Keep existing courses. Pre-selected
+                 from the PDFs where they say, with why; change any of them.
+    3. Courses   Check the courses pulled from the PDF (layouts vary, so this
                  list is editable: untick, fix a number, or add a row). The
                  PDF's upgrade / Course Archive text is shown above it.
-    3. Paste     The Order Info email and the portal's Content Licensing list.
-    4. Removals  Portal courses that aren't on the PDF, with the PDF's text
+    4. Paste     The Order Info email and the portal's Content Licensing list.
+    5. Removals  Portal courses that aren't on the PDF, with the PDF's text
                  about what's being removed above them. Ticked = archive and
                  remove, unticked = archive and reset. A PDF that only lists
-                 what's changing (an upgrade) starts with nothing ticked.
-    5. Results   Tasks   the work this order needs; BoldDesk tickets come with
+                 what's changing (Keep existing courses) starts with nothing
+                 ticked.
+    6. Results   Tasks   the work this order needs; BoldDesk tickets come with
                          Subject / Body / Public reply ready to copy
                  Order   portal exp date, plus warnings wherever the email,
                          SOW, estimate and portal disagree
@@ -32,9 +36,9 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QFileDialog, QGroupBox, QHBoxLayout,
+    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QFileDialog, QGroupBox, QHBoxLayout,
     QHeaderView, QLabel, QLineEdit, QListWidget, QMessageBox, QPlainTextEdit,
-    QPushButton, QSplitter, QStackedWidget, QTabWidget, QTableWidget,
+    QPushButton, QRadioButton, QSplitter, QStackedWidget, QTabWidget, QTableWidget,
     QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
 )
 
@@ -51,8 +55,8 @@ _COL_USE, _COL_NUM, _COL_NAME, _COL_NOTE = range(4)
 # Removals table: tick = archive and remove; the last column says why a row is suggested.
 _RCOL_REMOVE, _RCOL_NUM, _RCOL_NAME, _RCOL_WHY = range(4)
 
-_STEPS = ("PDFs", "Courses on PDF", "Paste", "Removals", "Results")
-_PDFS, _COURSES, _PASTE, _REMOVALS, _RESULTS = range(5)
+_STEPS = ("PDFs", "Order details", "Courses on PDF", "Paste", "Removals", "Results")
+_PDFS, _DETAILS, _COURSES, _PASTE, _REMOVALS, _RESULTS = range(6)
 
 # Highlighted (suggested) rows: dark text set explicitly so they stay readable
 # when Windows is in dark mode (its default text colour there is white).
@@ -131,7 +135,8 @@ class FulfillmentTab(QWidget):
         root.addLayout(steps)
 
         self._stack = QStackedWidget()
-        for page in (self._build_pdf_page(), self._build_courses_page(), self._build_paste_page(),
+        for page in (self._build_pdf_page(), self._build_details_page(),
+                     self._build_courses_page(), self._build_paste_page(),
                      self._build_removals_page(), self._build_results()):
             self._stack.addWidget(page)
         root.addWidget(self._stack, stretch=1)
@@ -170,6 +175,79 @@ class FulfillmentTab(QWidget):
         row.addStretch()
         pg.addLayout(row)
         return pdf_group
+
+    def _build_details_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        hint = QLabel("Pre-selected from the PDFs where they say, with why underneath. "
+                      "Change anything that's wrong; your choice is what the task list uses.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #6c757d;")
+        layout.addWidget(hint)
+
+        def radio_group(title, options):
+            box = QGroupBox(title)
+            v = QVBoxLayout(box)
+            group = QButtonGroup(box)
+            for opt in options:
+                b = QRadioButton(opt)
+                b.setProperty("value", opt)
+                group.addButton(b)
+                v.addWidget(b)
+            why = QLabel("")
+            why.setWordWrap(True)
+            why.setStyleSheet("color: #6c757d;")
+            v.addWidget(why)
+            layout.addWidget(box)
+            return group, why
+
+        self._type_group, self._type_why = radio_group("Order type", oc.ORDER_TYPES)
+        self._hosting_group, self._hosting_why = radio_group("Hosting", oc.HOSTING_OPTIONS)
+
+        keep_box = QGroupBox("Courses")
+        kv = QVBoxLayout(keep_box)
+        self._keep_existing = QCheckBox(
+            "Keep existing courses: the SOW only lists what's changing, and every other "
+            "course on the portal stays (archive and reset)")
+        kv.addWidget(self._keep_existing)
+        self._keep_why = QLabel("")
+        self._keep_why.setWordWrap(True)
+        self._keep_why.setStyleSheet("color: #6c757d;")
+        kv.addWidget(self._keep_why)
+        layout.addWidget(keep_box)
+        layout.addStretch()
+        return page
+
+    @staticmethod
+    def _set_choice(group: QButtonGroup, value: str):
+        group.setExclusive(False)   # lets every button be unticked when nothing was found
+        for b in group.buttons():
+            b.setChecked(b.property("value") == value)
+        group.setExclusive(True)
+
+    @staticmethod
+    def _choice(group: QButtonGroup) -> str:
+        b = group.checkedButton()
+        return b.property("value") if b else ""
+
+    def _fill_details(self):
+        """Pre-select from the PDFs. Runs only when the PDFs are (re)read, so
+        choices made here survive going back and forth."""
+        check = oc.check_order("", self._pdf_results)
+        self._set_choice(self._type_group, check.detected_order_type)
+        self._type_why.setText(
+            f"From {check.order_type_source}." if check.detected_order_type
+            else "Not clear from the PDFs. Pick one.")
+        self._set_choice(self._hosting_group, check.detected_hosting)
+        self._hosting_why.setText(
+            f"From {check.hosting_source}." if check.detected_hosting
+            else "Not clear from the PDFs. Pick one, or leave it for the Order email's URL to decide.")
+        reasons = rm.keep_existing_reasons(self._notes, self._pdf_results)
+        self._keep_existing.setChecked(bool(reasons))
+        self._keep_why.setText(
+            "Ticked because " + " ".join(reasons) if reasons
+            else "Nothing in the PDFs says so. Tick it if the SOW only lists the changes.")
 
     def _build_courses_page(self) -> QWidget:
         vsplit = QSplitter(Qt.Orientation.Vertical)
@@ -400,6 +478,7 @@ class FulfillmentTab(QWidget):
         self._details.clear()
         self._tasks_view.clear()
         self._pdf_notes.setHtml(self._pdf_notes_html(not merged.courses))
+        self._fill_details()
         return True
 
     def _pdf_notes_html(self, no_courses: bool) -> str:
@@ -545,6 +624,8 @@ class FulfillmentTab(QWidget):
             if not self._pdf_results or self._pdf_paths_changed():
                 if not self._on_read_pdfs():
                     return False
+            self._show_step(_DETAILS)
+        elif step == _DETAILS:
             self._show_step(_COURSES)
         elif step == _COURSES:
             _courses, problems = self._table_courses()
@@ -584,22 +665,23 @@ class FulfillmentTab(QWidget):
         portal = self._portal_result
         key = (tuple(sorted(c.number for c in pdf_courses)),
                tuple(c.number for c in portal.courses),
-               tuple(self._notes))
+               tuple(self._notes), self._keep_existing.isChecked())
         if key == self._plan_key:
             return   # same inputs: keep the ticks the user already set
         self._plan_key = key
-        plan = self._plan = rm.plan_removals(pdf_courses, portal.courses, self._notes)
+        plan = self._plan = rm.plan_removals(pdf_courses, portal.courses, self._notes,
+                                             keep_existing=self._keep_existing.isChecked())
 
         if plan.partial:
             self._removal_mode.setText(
-                "<b style='color:#b02a37'>This PDF looks like a change order, not a full course "
-                "list</b>, so nothing is ticked yet: unticked courses are archived and reset. "
+                "<b style='color:#b02a37'>Keep existing courses is ticked (step 2)</b>, "
+                "so nothing is ticked yet: unticked courses are archived and reset. "
                 "Tick the ones being removed (highlighted rows match the PDF's text).<br>"
                 "<span style='color:#6c757d'>" + html.escape(" ".join(plan.reasons)) + "</span>")
         else:
             self._removal_mode.setText(
-                "The PDF looks like a full course list, so every course that isn't on it is "
-                "ticked for archive and remove. Untick any the client is keeping.")
+                "Keep existing courses is unticked (step 2), so the PDF is treated as the "
+                "full course list: every course that isn't on it is ticked for archive and remove. Untick any the client is keeping.")
 
         parts = [self._notes_html(self._notes)] if self._notes else [
             "<p style='color:#6c757d'>The PDF has no upgrade or Course Archive text.</p>"]
@@ -665,7 +747,9 @@ class FulfillmentTab(QWidget):
     # ------------------------------------------------------------------
 
     def _refresh_order(self, portal: cc.ParseResult | None = None) -> oc.OrderCheck:
-        check = oc.check_order(self._email.toPlainText(), self._pdf_results, portal)
+        check = oc.check_order(self._email.toPlainText(), self._pdf_results, portal,
+                               order_type=self._choice(self._type_group),
+                               hosting=self._choice(self._hosting_group))
         self._order_view.show_check(check)
         return check
 
@@ -720,11 +804,15 @@ class FulfillmentTab(QWidget):
             )
         for title, courses in (("Add to portal", r.to_add),
                                ("Archive and remove", r.archive_remove),
-                               ("Archive and reset", r.archive_reset)):
+                               ("Archive and reset", r.archive_reset),
+                               ("Remove demo courses (yours, not in the archive ticket)",
+                                r.demo_remove)):
+            if not courses and title.startswith("Remove demo"):
+                continue
             items = "".join(
                 f"<li><b>{html.escape(c.number)}</b> {html.escape(c.name)}"
                 + (f" <i>({html.escape(c.note)})</i>" if c.note else "")
-                + (" <i>(not on the PDF; kept in step 4)</i>"
+                + (" <i>(not on the PDF; kept in step 5)</i>"
                    if title == "Archive and reset" and c.number in kept else "") + "</li>"
                 for c in courses
             ) or "<li><i>none</i></li>"
@@ -770,6 +858,11 @@ class FulfillmentTab(QWidget):
         self._removal_mode.clear()
         self._removal_count.clear()
         self._fill_table([])
+        self._set_choice(self._type_group, "")
+        self._set_choice(self._hosting_group, "")
+        self._keep_existing.setChecked(False)
+        for why in (self._type_why, self._hosting_why, self._keep_why):
+            why.clear()
         self._email.clear()
         self._portal.clear()
         self._clear_outputs()

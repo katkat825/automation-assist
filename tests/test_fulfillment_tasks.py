@@ -53,7 +53,7 @@ def test_renewal_tasks_in_order_with_handlers():
         ("Add courses", ft.FULFILLMENT),
         ("Course archive", ft.SUPPORT_TICKET),
         ("Communication materials", ft.SUPPORT_TICKET),
-        ("Customer communication", ft.FULFILLMENT_TICKET),
+        ("Customer notification", ft.FULFILLMENT_TICKET),
     ]
     assert _task(plan, "Update portal expiration date").details == ("example.glsondemand.com: 10/17/2027",)
 
@@ -78,7 +78,8 @@ def test_sku_tasks_prefer_estimate_and_flag_sow_only_items():
            SOW_TABLES[1]]
     plan = _plan(sow=_renewal_sow(sow), estimate=_estimate(tables=est))
     assert "Single Sign On" in _task(plan, "SSO").ticket.body
-    assert _task(plan, "SecurePhish").confirm == ""
+    assert _task(plan, "Phishing: PhishingBox").confirm == ""
+    assert _task(plan, "Phishing: PhishingBox").ticket is None
     custom = _task(plan, "Customization")
     assert custom.handled_by == ft.CUSTOMIZATION and "not on the estimate" in custom.confirm
 
@@ -88,14 +89,17 @@ def test_self_hosted_new_account_gets_scorm_and_comms_but_no_portal_work():
     est = _estimate(tables=scorm, url="NA SCORM")
     est.text += "\nNew Client"
     plan = _plan(email="", sow=_sow(tables=[]), estimate=est, with_courses=False)
-    assert _titles(plan) == ["SCORM delivery", "Communication materials"]
+    assert _titles(plan) == ["SCORM delivery", "Communication materials", "Customer notification"]
+    welcome = _task(plan, "Customer notification").ticket
+    assert welcome.subject.startswith("Welcome to Global Learning Systems!")
+    assert "SCORM course packages" in welcome.reply
     assert _task(plan, "Communication materials").confirm   # no toolbox on the SOW
     assert not any("Course tasks" in h for h in plan.header)
 
 
-def test_customer_communication_needs_renewal_wording():
+def test_customer_notification_needs_renewal_wording():
     plan = _plan(sow=_sow())   # order type not detected
-    task = _task(plan, "Customer communication")
+    task = _task(plan, "Customer notification")
     assert task.ticket is None and task.confirm
 
 
@@ -123,11 +127,17 @@ def test_archive_ticket_lists_date_and_matched_assessment():
 def test_archive_without_a_date_asks_to_confirm():
     tables = [SOW_TABLES[0], SOW_TABLES[1][:2] + [["Requested Date of Archive", "TBD"]]]
     task = _task(_plan(sow=_renewal_sow(tables)), "Course archive")
-    assert "DELAYED ARCHIVE" not in task.ticket.body and "TBD" in task.confirm
+    assert "DELAYED ARCHIVE" not in task.ticket.body
+    assert "Delayed Archive Date: TBD" in task.ticket.body and not task.confirm
+
+
+def test_archive_without_an_archive_section_asks_to_confirm():
+    task = _task(_plan(sow=_renewal_sow([SOW_TABLES[0]])), "Course archive")
+    assert "Delayed Archive" not in task.ticket.body and "not on the SOW" in task.confirm
 
 
 def test_customer_notification_reply():
-    t = _task(_plan(), "Customer communication").ticket
+    t = _task(_plan(), "Customer notification").ticket
     assert t.subject == "Thank you for renewing with GLS! Order #16842"
     assert t.reply.startswith("Hello Pat,\n\n")
     assert "URL: https://example.glsondemand.com" in t.reply
@@ -153,3 +163,96 @@ def test_format_plan_includes_ticket_text():
     assert "   Subject: 16842: Example Co (EXC): Archive" in text
     assert "   | Archive and Reset:" in text
     assert "   Attach: sow.pdf, est.pdf" in text
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-05 rules
+# ---------------------------------------------------------------------------
+
+def test_sso_already_in_place_is_not_a_ticket():
+    est = [ESTIMATE_TABLES[0] + [["DL-SSO Single Sign On Annual Subscription: In place.", "1", "0", "0"]]]
+    plan = _plan(estimate=_estimate(tables=est))
+    assert "SSO" not in _titles(plan)
+    assert any("SSO is already in place" in h for h in plan.header)
+
+
+def test_sso_not_yet_in_place_is_a_ticket():
+    est = [ESTIMATE_TABLES[0] + [["DL-SSO Single Sign On: not yet in place", "1", "0", "0"]]]
+    assert _task(_plan(estimate=_estimate(tables=est)), "SSO").ticket
+
+
+def test_demo_courses_are_a_fulfillment_task_not_in_the_archive_ticket():
+    portal = cc.parse_portal_list(PORTAL + "Share With Care 10823\t1\t5\tThirdPartyScorm\n")
+    check = oc.check_order(EMAIL, [_renewal_sow(), _estimate()], portal)
+    pdf = [cc.Course("10781", "Slay The Scam 10781")]
+    plan = ft.build_plan(check, cc.compare(pdf, portal.courses, portal.review))
+    demo = _task(plan, "Remove demo courses")
+    assert demo.handled_by == ft.FULFILLMENT and demo.details[0] == "10823"
+    assert "10823" not in _task(plan, "Course archive").ticket.body
+
+
+def test_add_courses_includes_license_count():
+    details = _task(_plan(), "Add courses").details
+    assert details[:2] == ("11594", "License count: 60")
+
+
+def test_add_courses_flags_add_on_bundles_with_other_counts():
+    sow = [SOW_TABLES[0] + [["CL-SST-ADD", "Add-on bundle", "$1", "20", "$20"]], SOW_TABLES[1]]
+    task = _task(_plan(sow=_renewal_sow(sow)), "Add courses")
+    assert "License count: 60" in task.details and "60, 20" in task.confirm
+
+
+def test_phishfirewall_is_flagged():
+    sow = _renewal_sow()
+    sow.text += "\nPhishFirewall Licensing"
+    task = _task(_plan(sow=sow), "Phishing: PhishFirewall")
+    assert task.confirm and task.ticket is None
+
+
+def test_term_in_order_email_reads_as_license_dates():
+    email = EMAIL.replace("License Dates:", "Term:")
+    check = oc.check_order(email, [_renewal_sow(), _estimate()])
+    assert check.email.fields["license_dates"] == "10/18/2026-10/17/2027"
+
+
+# ---------------------------------------------------------------------------
+# Order details choices, PhishFirewall-hosted, welcome emails
+# ---------------------------------------------------------------------------
+
+def _check(order_type="", hosting="", sow=None, estimate=None, email=EMAIL):
+    return oc.check_order(email, [sow or _renewal_sow(), estimate or _estimate()],
+                          order_type=order_type, hosting=hosting)
+
+
+def test_choices_replace_what_was_detected():
+    check = _check(order_type=oc.NEW_ACCOUNT, hosting=oc.PHISHFIREWALL_HOSTED)
+    assert (check.detected_order_type, check.detected_hosting) == (oc.RENEWAL, oc.GLS_HOSTED)
+    assert (check.order_type, check.hosting) == (oc.NEW_ACCOUNT, oc.PHISHFIREWALL_HOSTED)
+    assert any(f.source == oc.CHOSEN for f in check.facts)
+
+
+def test_detection_says_where_it_came_from():
+    check = _check()
+    assert check.order_type_source == '"RENEWAL PROPOSAL" in sow.pdf' and "DL-LMS1" in check.hosting_source
+
+
+def test_ai_managed_phishing_without_lms_sku_is_phishfirewall_hosted():
+    sow = _sow(tables=[[["SKU", "Description", "Total Users"], ["CL-BD_CUST", "AI-Managed Phishing", "3768"]]])
+    sow.text += "\nAI-Managed Phishing + Cybersecurity Awareness Education"
+    check = oc.check_order("", [sow])
+    assert check.hosting == oc.PHISHFIREWALL_HOSTED and "AI-Managed Phishing" in check.hosting_source
+
+
+def test_phishfirewall_hosted_plan():
+    plan = ft.build_plan(_check(order_type=oc.NEW_ACCOUNT, hosting=oc.PHISHFIREWALL_HOSTED), None)
+    titles = _titles(plan)
+    assert "Update PhishFirewall expiration date" in titles and "Update portal expiration date" not in titles
+    assert _task(plan, "Phishing: PhishFirewall").confirm
+    t = _task(plan, "Customer notification").ticket
+    assert "onboarding call" in t.reply and "PhishFirewall-Hosted" in t.body
+
+
+def test_gls_hosted_welcome_has_portal_url():
+    t = _task(ft.build_plan(_check(order_type=oc.NEW_ACCOUNT), None), "Customer notification").ticket
+    assert t.subject == "Welcome to GLS OnDemand! Order #16842"
+    assert t.reply.startswith("Hello Pat,") and "URL: https://example.glsondemand.com" in t.reply

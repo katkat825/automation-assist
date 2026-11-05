@@ -57,8 +57,12 @@ def _app_icon() -> QIcon:
 
 def _set_windows_app_id():
     """Give the process its own taskbar identity so Windows shows our icon
-    instead of python.exe's when running from source."""
-    if sys.platform != "win32":
+    instead of python.exe's when running from source.
+
+    Not for the built .exe: there Windows already takes the identity and icon
+    from the exe itself, and an explicit ID would split the running window
+    from a pinned AutomationAssist.exe into two taskbar buttons."""
+    if sys.platform != "win32" or getattr(sys, "frozen", False):
         return
     try:
         import ctypes

@@ -426,7 +426,64 @@ def test_demo_license_on_pdf_counts_as_add_not_reset():
     assert cc.format_numbers(r.archive_reset) == "10823"
 
 
-def test_demo_license_not_on_pdf_is_removed():
-    portal = cc.parse_portal_list("Slay The Scam 10781\t1\t5\tThirdPartyScorm").courses
+def test_demo_license_not_on_pdf_is_a_demo_removal_not_an_archive():
+    portal = cc.parse_portal_list("Slay The Scam 10781\t1\t5\tThirdPartyScorm\n"
+                                  "Share With Care 10823\t1\t350\tThirdPartyScorm").courses
     r = cc.compare([], portal)
-    assert cc.format_numbers(r.archive_remove) == "10781"
+    assert cc.format_numbers(r.demo_remove) == "10781"
+    assert cc.format_numbers(r.archive_remove) == "10823"
+
+
+def test_demo_license_kept_by_hand_is_reset():
+    portal = cc.parse_portal_list("Slay The Scam 10781\t1\t5\tThirdPartyScorm").courses
+    r = cc.compare([], portal, keep=["10781"])
+    assert cc.format_numbers(r.archive_reset) == "10781" and not r.demo_remove
+
+
+def test_term_label_counts_as_the_license_term():
+    dates, _ = cc.find_expiration_dates("Term: 10/18/2026-10/17/2027", "Order email")
+    assert [d.date for d in dates] == ["10/17/2027"]
+
+
+# ---------------------------------------------------------------------------
+# Numbered list with bracketed numbers (16849 West Michigan, Appendix A)
+# ---------------------------------------------------------------------------
+
+def test_numbered_list_with_bracketed_numbers():
+    page = _words([
+        (100, 50, "Core Cybersecurity Training"),
+        (112, 50, "Foundational training modules designed to establish baseline knowledge."),
+        (124, 50, "1. CyberEssentials: Principles of Cybersecurity (11412P)"),
+        (136, 50, "2. Anti-Phishing Essentials (11594)"),
+        (148, 50, "3. Cyber Showdown: Avoiding Business Email Compromise (BEC) Attacks (11270)"),
+    ])
+    r = cc.extract_courses_from_words([page], "p.pdf")
+    assert sorted((c.number, c.name) for c in r.courses) == [
+        ("11270", "Cyber Showdown: Avoiding Business Email Compromise (BEC) Attacks 11270"),
+        ("11412P", "CyberEssentials: Principles of Cybersecurity 11412P"),
+        ("11594", "Anti-Phishing Essentials 11594"),
+    ]
+    assert r.review == []
+
+
+def test_bracketed_number_typos_and_reused_numbers_go_to_review():
+    page = _words([
+        (100, 50, "1. Data Privacy Essentials (108671)"),
+        (112, 50, "2. Spot the Phish (115420"),
+        (124, 50, "3. Spot the Smish (11564)"),
+        (136, 50, "4. Spot the Vish (11564)"),
+    ])
+    r = cc.extract_courses_from_words([page], "p.pdf")
+    assert _numbers(r.courses) == ["11564"]
+    reasons = {i.text: i.reason for i in r.review}
+    assert "Probably 10867" in reasons["Data Privacy Essentials (108671)"]
+    assert "Probably 11542" in reasons["Spot the Phish (115420"]
+    assert "Same number as Spot the Smish 11564" in reasons["Spot the Vish 11564"]
+
+
+def test_user_count_in_pricing_table_is_not_a_course():
+    r = cc.ParseResult(courses=[cc.Course("3768", "3768")])
+    table = [["SKU", "Description", "Price per User", "Total Users"],
+             ["CL-BD_CUST", "AI-Managed Phishing + Awareness Package", "$5.50", "3768"]]
+    cc.add_sku_table_courses(r, [table], "p.pdf")
+    assert r.courses == []

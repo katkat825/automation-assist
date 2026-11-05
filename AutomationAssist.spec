@@ -1,8 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_data_files
 
-datas = [('app\\automation\\scorm\\runtime\\scorm_stub.js', 'app\\automation\\scorm\\runtime')]
-datas += [('app\\assets\\automation_assist.ico', 'app\\assets')]
+datas = [('app\\assets\\automation_assist.ico', 'app\\assets'), ('app\\automation\\scorm\\runtime\\scorm_stub.js', 'app\\automation\\scorm\\runtime')]
 datas += collect_data_files('spellchecker')
 
 
