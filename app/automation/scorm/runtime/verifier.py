@@ -39,6 +39,18 @@ def verify(scenario: dict, runlog: dict, rm: dict) -> dict:
 
     blocked = runlog.get("blocked", False)
 
+    # slides the driver could not drive but skipped past: each stays BLOCKED
+    # (never green), but the rest of the run still counts
+    skipped = runlog.get("skipped_blocked", []) or []
+    for sk in skipped:
+        add(f"slide_blocked:{sk['slide']}", "BLOCKED",
+            expected_s="slide driven to its next screen",
+            observed_s="skipped via menu/Next after block", detail=sk["reason"])
+    skip_note = (f"run skipped {len(skipped)} blocked slide(s) "
+                 f"({', '.join(s['slide'] for s in skipped)}); a completion "
+                 f"mismatch may be caused by the skip, not the course"
+                 if skipped else "")
+
     # ---------------------------------------------------------- completion
     for key, label in (("completion_status", "cmi.completion_status"),
                        ("success_status", "cmi.success_status")):
@@ -50,7 +62,7 @@ def verify(scenario: dict, runlog: dict, rm: dict) -> dict:
                     detail=runlog.get("blocked_reason", ""))
             else:
                 add(f"completion:{key}", "VERIFIED", ok=(obs == expected[key]),
-                    expected_s=expected[key], observed_s=obs)
+                    expected_s=expected[key], observed_s=obs, detail=skip_note)
     raw = cmi.get("cmi.score.scaled", "")
     if "score_scaled_gte" in expected or "score_scaled_lt" in expected:
         try:
@@ -193,6 +205,7 @@ def verify(scenario: dict, runlog: dict, rm: dict) -> dict:
     human_q_slides = {q["slide_id"] for q in rm["questions"]
                       if not q["drivable"] and not q["is_survey"]}
     sweep_items = 0
+    denom_items = set()
     for sid in route:
         if rm["slides"].get(sid, {}).get("text_entry") or sid in human_q_slides:
             continue   # handed to human pass; excluded from sweep denominator
@@ -208,7 +221,12 @@ def verify(scenario: dict, runlog: dict, rm: dict) -> dict:
                 and not f2.get("exits") and oid not in closers}
         conts = {c["obj_id"] for c in ams.get("continue_buttons", [])}
         sweep_items += len(ids - conts)
-    items_checked = len([c for c in checks if c["check"].startswith("item:")])
+        denom_items |= {f"item:{sid}:{oid}" for oid in ids - conts}
+    # count distinct denominator items only: chain-walk findings also cover
+    # closers (hide-others CONTINUE / carousel NEXT) that aren't in the
+    # denominator, which would otherwise report 'checked 58 of 56'
+    items_checked = len({c["check"] for c in checks
+                         if c["check"] in denom_items})
     gates_on_route = len([s for s in route if s in gated])
     gates_held = len([c for c in checks
                       if c["check"].startswith("gate_hold:") and c["ok"]])

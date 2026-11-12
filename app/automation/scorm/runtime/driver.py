@@ -94,6 +94,9 @@ class RunLog:
     edges: list = field(default_factory=list)
     blocked: bool = False
     blocked_reason: str = ""
+    # slides that BLOCKED but the run recovered past (menu/Next skip);
+    # [{slide, reason}] — each is still a BLOCKED check in the verifier
+    skipped_blocked: list = field(default_factory=list)
     scorm_log: list = field(default_factory=list)
     final_cmi: dict = field(default_factory=dict)
 
@@ -116,6 +119,7 @@ class Driver:
         self.unlocked = unlocked
         self.log = RunLog()
         self._swept = set()
+        self._verified = set()      # (slide, obj) whose reveal was already checked
         self.am_slides = {s["slide_id"]: s for s in rmodel["automodel"]["slides"]}
 
     # ------------------------------------------------------------- primitives
@@ -188,6 +192,31 @@ class Driver:
         except Exception:                                        # noqa: BLE001
             return False
 
+    def timeline_frac(self):
+        try:
+            return self.f.evaluate(
+                "() => { const i = document.querySelector("
+                "'input[aria-label=\"slide progress\"]');"
+                " return i ? Number(i.value) / Math.max(1, Number(i.max)) : 1; }")
+        except Exception:                                        # noqa: BLE001
+            return 1
+
+    def wait_timeline_end(self, slide_id):
+        """Fallback when the scrub didn't take (media still buffering, or the
+        player restarted the timeline): let the base timeline play out in real
+        time, bounded by its statically-known duration."""
+        dur = self.rm["slides"].get(slide_id, {}).get("duration_ms", 0) or 0
+        budget = min(dur + 5000, 180000)
+        self._step("await_timeline_end", slide_id,
+                   f"seek did not take; playing out (budget {budget}ms)")
+        end_t = time.time() + budget / 1000
+        while time.time() < end_t:
+            if self.timeline_frac() >= 0.98:
+                return True
+            self.f.evaluate(RESUME_IF_STALLED_JS)
+            self.page.wait_for_timeout(1000)
+        return False
+
     def obj_state(self, oid):
         try:
             return self.f.evaluate(VIS_JS, oid)
@@ -227,6 +256,7 @@ class Driver:
                     self._step("close_layer", c, f"layer {l['layer_id']}")
                     self.page.wait_for_timeout(700)
                     closed = True
+                    self._record_chain_click(slide_id, c)
                     break
             if not closed:
                 return self.visible_nonbase_layers(slide_id)
@@ -246,8 +276,15 @@ class Driver:
         for l in self.rm["slides"].get(slide_id, {}).get("layers", []):
             closers.update(l["close_objects"])
         sweep = []
+        # walk items in the order the course reveals them: base layer first,
+        # then layers by distance from base in the static reveal graph (click
+        # + timeline-end edges). Dict order can be the chain exactly reversed,
+        # which makes every later step look 'unreachable'.
+        depth = self._layer_depths(slide_id)
+        order = {oid: i for i, oid in enumerate(effects)}
         base_first = sorted(effects.items(),
-                            key=lambda kv: (kv[1].get("on_layer", "") != "", ))
+                            key=lambda kv: (depth.get(kv[1].get("on_layer", ""), 999),
+                                            order[kv[0]]))
         for oid, fx in base_first:
             if fx.get("shows_layers") and not fx.get("advances_to") \
                and not fx.get("exits") and oid not in closers \
@@ -282,6 +319,9 @@ class Driver:
         budget = min(max(2000, lay_dur + 1500), 15000)
         for oid in items:
             swept_out.append(oid)
+            if (slide_id, oid) in self._verified:
+                continue
+            self._verified.add((slide_id, oid))
             fx = effects.get(oid, {})
             end_t = time.time() + budget / 1000
             while time.time() < end_t and not self.obj_state(oid).get("visible"):
@@ -345,6 +385,9 @@ class Driver:
         sweep = self._sweep_items(slide_id)
 
         for oid in sweep:
+            if (slide_id, oid) in self._verified:
+                continue   # already checked while walking/clearing the chain
+            self._verified.add((slide_id, oid))
             fx = effects.get(oid, {})
             expected_layers = fx.get("shows_layers", [])
             self.ensure_clickable(slide_id, oid)
@@ -586,15 +629,119 @@ class Driver:
         return self.wait_slide(target_slide, timeout_s=25)
 
     # ------------------------------------------------------------- traversal
-    def ensure_clickable(self, slide_id, oid, depth=0):
-        """If oid lives on a currently-hidden layer, reveal that layer via a
-        statically-known revealer chain (bounded recursion — Storyline slides
-        nest layer->continue->layer). Deterministic: model-named objects only."""
+    def _layer(self, slide_id, layer_id):
+        return next((l for l in self.rm["slides"].get(slide_id, {}).get("layers", [])
+                     if l["layer_id"] == layer_id), None)
+
+    def _layer_budget_ms(self, slide_id, layer_id):
+        """Wait budget for a layer's own timeline to play (statically known)."""
+        lay = self._layer(slide_id, layer_id) or {}
+        dur = lay.get("duration_ms", 0) or 0
+        return min(max(2500, dur + 2500), 45000)
+
+    def _wait_layer(self, slide_id, layer_id, budget_ms):
+        end_t = time.time() + budget_ms / 1000
+        while time.time() < end_t:
+            if self.layer_visible(slide_id, layer_id):
+                return True
+            self.page.wait_for_timeout(500)
+        return False
+
+    def _layer_depths(self, slide_id):
+        """Distance of each layer from the base layer in the slide's static
+        reveal graph (click edges + timeline-end edges). Used to sweep items
+        in the order the course actually reveals them."""
+        rs = self.rm["slides"].get(slide_id, {})
+        edges = {}
+        for f2 in rs.get("effects", {}).values():
+            for t in f2.get("shows_layers") or []:
+                edges.setdefault(f2.get("on_layer", ""), set()).add(t)
+        for l in rs.get("layers", []):
+            for src in ((l.get("revealed_by_timeline_of") or [])
+                        + (l.get("revealed_on_start_of") or [])):
+                edges.setdefault(src, set()).add(l["layer_id"])
+        depth, frontier = {"": 0}, [""]
+        while frontier:
+            nxt = []
+            for a in frontier:
+                for b in sorted(edges.get(a, ())):
+                    if b not in depth:
+                        depth[b] = depth[a] + 1
+                        nxt.append(b)
+            frontier = nxt
+        return depth
+
+    def _record_chain_click(self, slide_id, oid):
+        """A control clicked while clearing/walking layers may itself be a
+        sweep item (e.g. a hide-others CONTINUE that opens the next layer):
+        verify its reveal now, so the sweep doesn't re-walk the chain later."""
+        if (slide_id, oid) in self._verified:
+            return
+        fx = self.rm["slides"].get(slide_id, {}).get("effects", {}).get(oid) or {}
+        exp = fx.get("shows_layers") or []
+        if not exp or fx.get("advances_to"):
+            return
+        shown = [l2 for l2 in exp if self._wait_layer(
+            slide_id, l2, min(self._layer_budget_ms(slide_id, l2), 8000))]
+        self._verified.add((slide_id, oid))
+        self._find(kind="item_reveal", slide=slide_id, target=oid, ok=bool(shown),
+                   expected=f"opens layer {exp}",
+                   observed=(f"layer {shown} visible" if shown
+                             else "expected layer not visible"))
+
+    def ensure_layer(self, slide_id, layer_id, _seen=None):
+        """Make a layer visible by walking its statically-known reveal chain
+        backwards: a click revealer (itself possibly on another hidden layer)
+        or another layer whose timeline ENDING shows it. Deterministic:
+        model-named objects only; cycle-safe via _seen."""
+        if self.layer_visible(slide_id, layer_id):
+            return True
+        seen = set() if _seen is None else _seen
+        if layer_id in seen or len(seen) > 40:
+            return False
+        seen.add(layer_id)
+        fx_all = self.rm["slides"].get(slide_id, {}).get("effects", {})
+        budget = self._layer_budget_ms(slide_id, layer_id)
+        for r, f2 in fx_all.items():
+            if layer_id not in (f2.get("shows_layers") or []):
+                continue
+            if not self.ensure_clickable(slide_id, r, _seen=seen):
+                continue
+            if self.click_obj(r, timeout_ms=3000, expect_fail=True):
+                self._step("reveal_layer", r, f"layer {layer_id}")
+                if self._wait_layer(slide_id, layer_id, budget):
+                    if (slide_id, r) not in self._verified and \
+                            not f2.get("advances_to"):
+                        self._verified.add((slide_id, r))
+                        self._find(kind="item_reveal", slide=slide_id, target=r,
+                                   ok=True, expected=f"opens layer {[layer_id]}",
+                                   observed=f"layer {[layer_id]} visible "
+                                            f"(while walking reveal chain)")
+                    return True
+        lay = self._layer(slide_id, layer_id) or {}
+        for src in lay.get("revealed_on_start_of") or []:
+            if not self.ensure_layer(slide_id, src, seen):
+                continue
+            if self._wait_layer(slide_id, layer_id, budget):
+                return True
+        for src in lay.get("revealed_by_timeline_of") or []:
+            if src and not self.ensure_layer(slide_id, src, seen):
+                continue
+            src_budget = (self._layer_budget_ms(slide_id, src) if src else 15000)
+            self._step("await_timeline_reveal", layer_id,
+                       f"after {'layer ' + src if src else 'base'} timeline ends "
+                       f"(budget {src_budget}ms)")
+            if self._wait_layer(slide_id, layer_id, src_budget + budget):
+                return True
+        return False
+
+    def ensure_clickable(self, slide_id, oid, _seen=None):
+        """If oid lives on a currently-hidden layer, reveal that layer via its
+        statically-known reveal chain (clicks and timeline-end reveals), then
+        wait for oid to appear on the layer's timeline."""
         st = self.obj_state(oid)
         if st.get("present") and st.get("visible"):
             return True
-        if depth >= 6:
-            return False
         fx_all = self.rm["slides"].get(slide_id, {}).get("effects", {})
         layer = (fx_all.get(oid) or {}).get("on_layer", "")
         if not layer:
@@ -603,27 +750,25 @@ class Driver:
                 if c["obj_id"] == oid and not c.get("on_base", True):
                     layer = c.get("layer_id", "")
         if not layer:
-            return st.get("present", False)
-        revealers = [o for o, f2 in fx_all.items()
-                     if layer in (f2.get("shows_layers") or []) and o != oid]
-        # poll budget: the revealed layer's own timeline must play before its
-        # objects appear (statically-known duration, bounded)
-        lay_dur = 0
-        for l in self.rm["slides"].get(slide_id, {}).get("layers", []):
-            if l["layer_id"] == layer:
-                lay_dur = l.get("duration_ms", 0) or 0
-        budget = min(max(2000, lay_dur + 1500), 15000)
-        for r in revealers:
-            if not self.ensure_clickable(slide_id, r, depth + 1):
-                continue
-            if self.click_obj(r, timeout_ms=3000, expect_fail=True):
-                self._step("reveal_layer", r, f"layer {layer} for {oid}")
-                end_t = time.time() + budget / 1000
-                while time.time() < end_t:
-                    st = self.obj_state(oid)
-                    if st.get("present") and st.get("visible"):
-                        return True
-                    self.page.wait_for_timeout(500)
+            # hidden base object that a layer shows by itself (layer start/end
+            # 'show' action) — reach that layer, then wait for the object
+            shown_by = [l["layer_id"] for l in
+                        self.rm["slides"].get(slide_id, {}).get("layers", [])
+                        if oid in (l.get("shows_objects") or [])]
+            if not (st.get("present") and shown_by):
+                return st.get("present", False)
+            if not any(self.ensure_layer(slide_id, l2, _seen) for l2 in shown_by):
+                return False
+            layer = shown_by[0]
+        elif not self.ensure_layer(slide_id, layer, _seen):
+            return False
+        # the object appears at its cue on the layer's own timeline
+        end_t = time.time() + self._layer_budget_ms(slide_id, layer) / 1000
+        while time.time() < end_t:
+            st = self.obj_state(oid)
+            if st.get("present") and st.get("visible"):
+                return True
+            self.page.wait_for_timeout(500)
         return False
 
     def advance(self, slide_id, next_slide, prefer_obj=None):
@@ -706,6 +851,119 @@ class Driver:
                           f" (at {self.cur_slide()})", slide_id)
         return True
 
+    def _run_slide(self, i, sid, route, answers, scenario):
+        """Drive one route slide (sweep/answer/advance). Raises Blocked."""
+        cur = self.cur_slide()
+        if cur == sid and (not self.log.slides_visited
+                           or self.log.slides_visited[-1] != sid):
+            self.log.slides_visited.append(sid)
+        if cur != sid:
+            # resync: gate-failure findings can skip us ahead
+            if cur in route[i:]:
+                return
+            self._blocked(f"expected {sid}, at {cur}", sid)
+        dragdrop_here = (sid in answers
+                         and answers[sid].get("type") == "dragdrop")
+        if self.unlocked and not dragdrop_here:
+            # let the slide transition-in settle before scrubbing
+            self.page.wait_for_timeout(1200)
+            if not self.seek_end():
+                self.wait_timeline_end(sid)
+            # model-known auto-revealed layers must appear at timeline
+            # end; wait for them (one deterministic re-seek retry)
+            auto_layers = (self.am_slides.get(sid, {})
+                           .get("auto_revealed_layers") or [])
+            if auto_layers:
+                for attempt in range(2):
+                    end_t = time.time() + 8
+                    shown = False
+                    while time.time() < end_t and not shown:
+                        shown = any(self.layer_visible(sid, l)
+                                    for l in auto_layers)
+                        if not shown:
+                            self.page.wait_for_timeout(600)
+                    if shown:
+                        break
+                    self.seek_end()
+        elif not self.unlocked:
+            dur = self.rm["slides"].get(sid, {}).get("duration_ms", 0)
+            self.page.wait_for_timeout(min(dur + 1500, 90_000))
+        else:
+            # drag-drop slide: no scrubbing — sequential-card cues
+            # depend on the timeline playing naturally
+            self.page.wait_for_timeout(1500)
+        self.clear_modal_layers(sid)
+        is_last = (i == len(route) - 1)
+        # slides automation must not drive — text entry, or a
+        # non-drivable graded question (drag-drop etc.) whose gate can
+        # only open by completing it — go to the human pass; skip via
+        # the menu (unlocked builds only)
+        nondrivable_q = any(
+            q["slide_id"] == sid and not q["drivable"] and not q["is_survey"]
+            for q in self.rm.get("questions", []))
+        if (self.rm["slides"].get(sid, {}).get("text_entry")
+                or nondrivable_q) and not is_last:
+            why = ("text entry" if self.rm["slides"][sid].get("text_entry")
+                   else "non-drivable question (e.g. drag-drop)")
+            self._find(kind="human_skip", slide=sid,
+                       ok=True, expected=f"human pass ({why})",
+                       observed="skipped via menu")
+            nxt = route[i + 1]
+            if self.unlocked and (self.menu_jump(nxt)
+                                  or self.chrome_next(nxt)):
+                self.log.edges.append([sid, nxt])
+                return
+            self._blocked(f"human-pass slide {sid} cannot be skipped "
+                          f"(menu jump and chrome-next to {nxt} "
+                          f"both failed)", sid)
+        if sid in answers:
+            self.answer_question(sid, answers[sid])
+            if not is_last:
+                nxt = route[i + 1]
+                if not self.continue_after_feedback(sid, nxt):
+                    self._blocked(f"no feedback continue appeared on {sid}",
+                                  sid)
+                if not self.wait_slide(nxt, timeout_s=25):
+                    self._blocked(f"feedback continue did not reach {nxt}",
+                                  sid)
+                self.log.edges.append([sid, nxt])
+            return
+        if scenario.get("sweep", True) and sid not in self._swept:
+            self._swept.add(sid)
+            self.sweep_slide(sid)
+        elif not scenario.get("sweep", True):
+            self.satisfy_gates(sid)
+        if not is_last:
+            if self.cur_slide() == sid:   # gate-failure may have advanced us
+                self.advance(sid, route[i + 1])
+
+    def _recover_past_block(self, i, sid, route, reason):
+        """A blocked slide shouldn't end the whole scenario. Record it, then
+        try to reach the next route slide by the unlocked menu or the player's
+        Next button. Locked builds (menu items locked, no Next) can't recover,
+        and the scenario stops as before."""
+        if i >= len(route) - 1 or not self.unlocked:
+            return False
+        nxt = route[i + 1]
+        cur = self.cur_slide()
+        if cur in route[i + 1:]:
+            ok = True     # the block left us further along the route already
+        else:
+            self.clear_modal_layers(cur or sid)
+            ok = self.menu_jump(nxt) or self.chrome_next(nxt)
+        if not ok:
+            self._step("recover_failed", sid,
+                       f"could not skip to {nxt} after block", "blocked")
+            return False
+        self.log.skipped_blocked.append({"slide": sid, "reason": reason})
+        self._step("recover_skip", sid, f"skipped to {self.cur_slide()} after: "
+                                        f"{reason[:100]}")
+        if self.cur_slide() == nxt:
+            self.log.edges.append([sid, nxt])
+        self.log.blocked = False
+        self.log.blocked_reason = ""
+        return True
+
     # ------------------------------------------------------------- scenario
     def run(self, scenario: dict):
         self.log.scenario_id = scenario["id"]
@@ -716,88 +974,11 @@ class Driver:
                 self._blocked(f"entry slide {route[0]} never appeared "
                               f"(at {self.cur_slide()})")
             for i, sid in enumerate(route):
-                cur = self.cur_slide()
-                if cur == sid and (not self.log.slides_visited
-                                   or self.log.slides_visited[-1] != sid):
-                    self.log.slides_visited.append(sid)
-                if cur != sid:
-                    # resync: gate-failure findings can skip us ahead
-                    if cur in route[i:]:
-                        continue
-                    self._blocked(f"expected {sid}, at {cur}", sid)
-                dragdrop_here = (sid in answers
-                                 and answers[sid].get("type") == "dragdrop")
-                if self.unlocked and not dragdrop_here:
-                    # let the slide transition-in settle before scrubbing
-                    self.page.wait_for_timeout(1200)
-                    self.seek_end()
-                    # model-known auto-revealed layers must appear at timeline
-                    # end; wait for them (one deterministic re-seek retry)
-                    auto_layers = (self.am_slides.get(sid, {})
-                                   .get("auto_revealed_layers") or [])
-                    if auto_layers:
-                        for attempt in range(2):
-                            end_t = time.time() + 8
-                            shown = False
-                            while time.time() < end_t and not shown:
-                                shown = any(self.layer_visible(sid, l)
-                                            for l in auto_layers)
-                                if not shown:
-                                    self.page.wait_for_timeout(600)
-                            if shown:
-                                break
-                            self.seek_end()
-                elif not self.unlocked:
-                    dur = self.rm["slides"].get(sid, {}).get("duration_ms", 0)
-                    self.page.wait_for_timeout(min(dur + 1500, 90_000))
-                else:
-                    # drag-drop slide: no scrubbing — sequential-card cues
-                    # depend on the timeline playing naturally
-                    self.page.wait_for_timeout(1500)
-                self.clear_modal_layers(sid)
-                is_last = (i == len(route) - 1)
-                # slides automation must not drive — text entry, or a
-                # non-drivable graded question (drag-drop etc.) whose gate can
-                # only open by completing it — go to the human pass; skip via
-                # the menu (unlocked builds only)
-                nondrivable_q = any(
-                    q["slide_id"] == sid and not q["drivable"] and not q["is_survey"]
-                    for q in self.rm.get("questions", []))
-                if (self.rm["slides"].get(sid, {}).get("text_entry")
-                        or nondrivable_q) and not is_last:
-                    why = ("text entry" if self.rm["slides"][sid].get("text_entry")
-                           else "non-drivable question (e.g. drag-drop)")
-                    self._find(kind="human_skip", slide=sid,
-                               ok=True, expected=f"human pass ({why})",
-                               observed="skipped via menu")
-                    nxt = route[i + 1]
-                    if self.unlocked and (self.menu_jump(nxt)
-                                          or self.chrome_next(nxt)):
-                        self.log.edges.append([sid, nxt])
-                        continue
-                    self._blocked(f"human-pass slide {sid} cannot be skipped "
-                                  f"(menu jump and chrome-next to {nxt} "
-                                  f"both failed)", sid)
-                if sid in answers:
-                    self.answer_question(sid, answers[sid])
-                    if not is_last:
-                        nxt = route[i + 1]
-                        if not self.continue_after_feedback(sid, nxt):
-                            self._blocked(f"no feedback continue appeared on {sid}",
-                                          sid)
-                        if not self.wait_slide(nxt, timeout_s=25):
-                            self._blocked(f"feedback continue did not reach {nxt}",
-                                          sid)
-                        self.log.edges.append([sid, nxt])
-                    continue
-                if scenario.get("sweep", True) and sid not in self._swept:
-                    self._swept.add(sid)
-                    self.sweep_slide(sid)
-                elif not scenario.get("sweep", True):
-                    self.satisfy_gates(sid)
-                if not is_last:
-                    if self.cur_slide() == sid:   # gate-failure may have advanced us
-                        self.advance(sid, route[i + 1])
+                try:
+                    self._run_slide(i, sid, route, answers, scenario)
+                except Blocked as b:
+                    if not self._recover_past_block(i, sid, route, str(b)):
+                        raise
             ams = self.am_slides.get(route[-1], {})
             self._find(kind="terminal", slide=route[-1],
                        ok="terminal" in (ams.get("flags") or []) or True,

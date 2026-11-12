@@ -65,6 +65,18 @@ class LayerBinding:
     duration_ms: int = 0                               # the layer's own timeline
     ident_objects: list = field(default_factory=list)  # obj_ids that identify this layer in DOM
     close_objects: list = field(default_factory=list)  # obj_ids whose click hides this layer
+    # layers whose timeline ENDING shows this layer (ontimelinecomplete ->
+    # show_slidelayer); "" = the base layer's timeline. Without this edge a
+    # layer chain like "2 s click layer -> result layer" looks unreachable.
+    revealed_by_timeline_of: list = field(default_factory=list)
+    # layers that show this layer as soon as THEY start (layer onslidestart /
+    # ontimelinestart -> show_slidelayer), e.g. a FACT/MYTH feedback layer
+    # that immediately shows the next CONTINUE layer
+    revealed_on_start_of: list = field(default_factory=list)
+    # objects this layer shows by itself when it starts/ends (e.g. the last
+    # carousel layer un-hides the base CONTINUE): reaching the layer is the
+    # way to make those objects clickable
+    shows_objects: list = field(default_factory=list)
 
 
 @dataclass
@@ -235,6 +247,52 @@ def _extract_slide_effects(slide_raw: dict) -> tuple[dict, dict]:
                 find_layers(v)
 
     find_layers(slide_raw)
+
+    # timeline-end reveals: layer (or base) timeline completes -> shows layer
+    def add_reveals(src, events, field_for):
+        for ev in events or []:
+            fld = field_for(ev.get("kind"))
+            if not fld:
+                continue
+            for a in _effects_in(ev.get("actions", []), groups):
+                if a.get("kind") != "show_slidelayer":
+                    continue
+                tgt = _ref_id(a)
+                if tgt in layers and tgt != src:
+                    lst = getattr(layers[tgt], fld)
+                    if src not in lst:
+                        lst.append(src)
+
+    # slide-level timeline end = the base layer's timeline ("" source)
+    if isinstance(slide_raw.get("events"), list):
+        add_reveals("", slide_raw["events"],
+                    lambda k: "revealed_by_timeline_of" if k == "ontimelinecomplete" else None)
+
+    def find_timeline_reveals(o):
+        if isinstance(o, dict):
+            if isinstance(o.get("slideLayers"), list):
+                for lay in o["slideLayers"]:
+                    src = "" if lay.get("isBaseLayer") else lay.get("id", "")
+                    for ev in lay.get("events", []) or []:
+                        if src and ev.get("kind") in ("onslidestart", "ontimelinestart",
+                                                      "ontimelinecomplete"):
+                            for a in _effects_in(ev.get("actions", []), groups):
+                                if a.get("kind") == "show":
+                                    oid = _ref_id(a)
+                                    if oid and oid not in layers and oid != src and \
+                                            oid not in layers[src].shows_objects:
+                                        layers[src].shows_objects.append(oid)
+                    add_reveals(src, lay.get("events"), lambda k: (
+                        "revealed_by_timeline_of" if k == "ontimelinecomplete"
+                        else "revealed_on_start_of"
+                        if src and k in ("onslidestart", "ontimelinestart") else None))
+            for v in o.values():
+                find_timeline_reveals(v)
+        elif isinstance(o, list):
+            for v in o:
+                find_timeline_reveals(v)
+
+    find_timeline_reveals(slide_raw)
 
     for o, layer_id in _iter_objects(slide_raw):
         oid = o.get("id", "")
