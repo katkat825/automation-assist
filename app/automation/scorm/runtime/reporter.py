@@ -65,6 +65,9 @@ def report(rm: dict, planned: dict, results: list, out_dir: str) -> str:
             add("HUMAN PASS (UNCHECKED-BY-DESIGN):")
             for x in uncheck:
                 add(f"  [HUMAN] {x['check']} — {x.get('detail') or ''}")
+        if r.get("lms_tracking"):
+            from .lms_tracking import format_summary
+            add(format_summary(r["lms_tracking"]))
         # incomplete coverage forces non-green
         for k, v in cov.items():
             if "checked" in v and "of" in v and v["of"] and v["checked"] < v["of"] \

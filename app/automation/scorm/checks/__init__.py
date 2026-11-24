@@ -28,6 +28,7 @@ from .course_checks import (
     check_scoring,
     check_menu,
     check_questions,
+    check_interaction_reporting,
     check_video_speed,
 )
 from .text_checks import check_duplicates, check_whitespace_and_spelling
@@ -39,7 +40,7 @@ from .runner import run_all_checks
 __all__ = [
     "CheckItem", "Section", "Report",
     "check_course_overview", "check_course_paths", "check_scorm_api",
-    "check_scoring", "check_menu", "check_questions", "check_video_speed",
+    "check_scoring", "check_menu", "check_questions", "check_interaction_reporting", "check_video_speed",
     "check_duplicates", "check_whitespace_and_spelling",
     "check_prev_navigation",
     "check_terminology", "check_untranslated_english",

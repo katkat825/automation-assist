@@ -14,6 +14,7 @@ from .course_checks import (
     check_scoring,
     check_menu,
     check_questions,
+    check_interaction_reporting,
     check_video_speed,
 )
 from .text_checks import check_duplicates, check_whitespace_and_spelling
@@ -45,6 +46,7 @@ def run_all_checks(
         check_scoring(data),
         check_menu(data),
         check_questions(data),
+        check_interaction_reporting(data),
         check_video_speed(data, story),
         check_duplicates(data, dual_path=dual_path),
         check_whitespace_and_spelling(data, skip_spelling=non_english),

@@ -27,6 +27,14 @@ BLOCKED step), `runtime_report.txt` / `.json`.
 - `verifier.py` — pure verdicts: VERIFIED / BLOCKED / UNCHECKED-BY-DESIGN /
   BYPASSED + N-of-M coverage; three-way question match.
 - `reporter.py` — merged course report; green only when denominators close.
+  Each scenario also gets an LMS tracking summary (if/when status, score and
+  interactions were sent).
+- `lms_tracking.py` — pure helpers for the QA Companion: the LMS tracking
+  timeline (status / score / interactions / Commit / Terminate, stamped with
+  the screen that sent them) and suspend points (snapshot the CMI state with
+  the panel's "Save suspend point" button; relaunch with `--resume-from`).
+  Companion outputs: `lms_tracking.log`, `lms_tracking_summary.txt`,
+  `scorm_api_log.json`, `suspend_points/*.json`.
 - `media_prep.py` — VP9/Opus transcode of package mp4s (test Chromium has no
   H.264/AAC). Marker-cached; visuals stay the human pass's job.
 

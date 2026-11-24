@@ -22,8 +22,26 @@
   const seed = window.__scormSeed || {};
   Object.assign(cmi, seed);
   let lastError = '0';
+  // Slide visible right now (same rule as the harness: last visible .slide.cs-<id>).
+  // Stamped on writes so a tracking timeline can say which screen sent what.
+  function curSlide() {
+    try {
+      const fr = document.getElementById('course');
+      const doc = fr && fr.contentDocument; if (!doc) return null;
+      const vis = Array.prototype.filter.call(doc.querySelectorAll('.slide[class*="cs-"]'), function (s) {
+        const cs = doc.defaultView.getComputedStyle(s), r = s.getBoundingClientRect();
+        return cs.display !== 'none' && cs.visibility !== 'hidden' && r.width > 0;
+      });
+      if (!vis.length) return null;
+      const m = vis[vis.length - 1].className.match(/cs-([A-Za-z0-9_$]+)/);
+      return m ? m[1] : null;
+    } catch (e) { return null; }
+  }
+  const STAMP = { SetValue: 1, LMSSetValue: 1, Commit: 1, LMSCommit: 1, Terminate: 1, LMSFinish: 1 };
   function rec(fn, args, result) {
-    log.push({ t: Date.now(), fn, args: Array.from(args), result });
+    const e = { t: Date.now(), fn, args: Array.from(args), result };
+    if (STAMP[fn]) e.slide = curSlide();
+    log.push(e);
     return result;
   }
   function countKey(prefix) {

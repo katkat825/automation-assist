@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 
 from ..paths import DATA_DIR
 from ..automation.scorm.runtime import cli as runtime_cli
+from ..automation.scorm.runtime import lms_tracking
 
 
 _MONO = QFont("Courier New")
@@ -188,6 +189,28 @@ class ScormRuntimeTab(QWidget):
         og.addStretch()
         root.addWidget(opt_group)
 
+        # --- Companion start point (suspend points saved from the panel) ---
+        resume_row = QHBoxLayout()
+        resume_row.addWidget(QLabel("Companion starts from:"))
+        self._resume_combo = QComboBox()
+        self._resume_combo.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                         QSizePolicy.Policy.Preferred)
+        self._resume_combo.setToolTip(
+            "Only applies to ‘Open QA Companion’.\n"
+            "Pick a suspend point you saved with the panel's ‘Save suspend point’\n"
+            "button to relaunch the course exactly there (the course gets that\n"
+            "suspend data with cmi.entry = resume, like a real LMS relaunch).\n"
+            "If the course is published to prompt before resuming, it will ask."
+        )
+        resume_row.addWidget(self._resume_combo)
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.setFixedWidth(80)
+        refresh_btn.setToolTip("Re-scan this course's saved suspend points.")
+        refresh_btn.clicked.connect(self._refresh_suspend_points)
+        resume_row.addWidget(refresh_btn)
+        root.addLayout(resume_row)
+        self._refresh_suspend_points()
+
         # --- Action buttons ---
         action_row = QHBoxLayout()
         self._run_btn = QPushButton("Run Runtime QA")
@@ -266,6 +289,25 @@ class ScormRuntimeTab(QWidget):
             self._zip_label.setText(os.path.basename(path))
             self._zip_label.setToolTip(path)
             self._zip_label.setStyleSheet("color: #000;")
+            self._refresh_suspend_points()
+
+    def _refresh_suspend_points(self):
+        """List the selected course's saved suspend points, newest first."""
+        keep = self._resume_combo.currentData()
+        self._resume_combo.clear()
+        self._resume_combo.addItem("Beginning (fresh launch)", None)
+        if not self._zip_path:
+            return
+        folder = lms_tracking.suspend_dir(_RUNTIME_OUT_DIR, self._zip_path)
+        for path, snap in lms_tracking.list_snapshots(folder):
+            label = lms_tracking.describe_snapshot(snap)
+            if not snap.get("suspend_data_length"):
+                label += "  [no suspend data]"
+            self._resume_combo.addItem(label, str(path))
+        if keep:
+            i = self._resume_combo.findData(keep)
+            if i >= 0:
+                self._resume_combo.setCurrentIndex(i)
 
     # ------------------------------------------------------------------
     # Run lifecycle helpers
@@ -342,6 +384,9 @@ class ScormRuntimeTab(QWidget):
             argv.append("--dual-path")
         if self._capture_chk.isChecked():
             argv.append("--capture-shots")
+        resume = self._resume_combo.currentData()
+        if resume:
+            argv += ["--resume-from", resume]
 
         self._start_worker(
             argv, "companion",
@@ -391,6 +436,8 @@ class ScormRuntimeTab(QWidget):
 
     def _on_finished(self, rc: int):
         self._reset_buttons()
+        if self._mode == "companion":
+            self._refresh_suspend_points()   # pick up points saved this session
         if self._out_dir and Path(self._out_dir).exists():
             self._open_btn.setEnabled(True)
         if rc == _RC_CANCELLED:

@@ -34,6 +34,7 @@ from .driver import Driver
 from .verifier import verify
 from .reporter import report
 from .cancel import Cancelled, check, is_cancelled
+from . import lms_tracking
 
 
 def _default_log(msg):
@@ -281,7 +282,88 @@ def observe(args, cancel=None):
         log("capture: base state grabbed on each new screen; press the panel's "
             "‘Capture state’ button (or Ctrl+Shift+S) for each layer.")
 
-    srv = CourseServer(course_dir, companion=companion, capture=bool(cap))
+    # --- optional resume from a saved suspend point -------------------------
+    seed = None
+    if args.resume_from:
+        try:
+            snap = lms_tracking.load_snapshot(args.resume_from)
+        except (OSError, ValueError) as e:
+            log(f"resume: can't use {args.resume_from} ({e}) — starting from "
+                "the beginning instead")
+        else:
+            seed = lms_tracking.seed_from_snapshot(snap)
+            log(f"resume: relaunching from suspend point "
+                f"'{lms_tracking.describe_snapshot(snap)}' "
+                f"({snap.get('suspend_data_length', 0)} chars of suspend data, "
+                "cmi.entry=resume)")
+            if snap.get("course") and snap["course"] != Path(args.zip_path).stem:
+                log(f"resume: WARNING — this suspend point was saved from "
+                    f"'{snap['course']}', not this package. A different build "
+                    "may not resume cleanly.")
+
+    # --- LMS tracking timeline + suspend points ------------------------------
+    course_out = Path(args.data_dir) / Path(args.zip_path).stem
+    course_out.mkdir(parents=True, exist_ok=True)
+    screens = (companion or {}).get("slides", {})
+    track_log = course_out / "lms_tracking.log"
+    susp_dir = lms_tracking.suspend_dir(args.data_dir, args.zip_path)
+    api_log: list = []          # full transcript, fetched incrementally
+    session_tag = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with track_log.open("a", encoding="utf-8") as fh:
+        fh.write(f"\n=== session {session_tag}"
+                 + (f" (resumed from {Path(args.resume_from).name})" if seed else "")
+                 + " ===\n")
+
+    def _poll_tracking(L):
+        new = L.scorm_log_since(len(api_log))
+        if not new:
+            return
+        api_log.extend(new)
+        lines = [lms_tracking.format_event(e, screens)
+                 for e in lms_tracking.tracking_events(new)
+                 if lms_tracking.classify(e) != "commit"]  # commits: summary only
+        if lines:
+            with track_log.open("a", encoding="utf-8") as fh:
+                fh.write("\n".join(lines) + "\n")
+            for ln in lines:
+                print("  LMS " + ln, flush=True)
+
+    def _save_suspend_points(L):
+        for req in L.drain_suspend_queue():
+            snap = lms_tracking.make_snapshot(
+                req.get("cmi") or {}, course=Path(args.zip_path).stem,
+                slide_id=req.get("slide"), screens=screens)
+            try:
+                path = lms_tracking.save_snapshot(snap, susp_dir)
+            except OSError as e:
+                print(f"  suspend: FAILED to save ({e})", flush=True)
+                L.set_suspend_status("✖ save failed — see log")
+                continue
+            empty = not snap["suspend_data_length"]
+            print(f"  \U0001f4be suspend point saved: "
+                  f"{lms_tracking.describe_snapshot(snap)} -> {path.name}"
+                  + ("  (WARNING: the course hasn't written any suspend data "
+                     "yet, so resuming will start from the beginning)" if empty else ""),
+                  flush=True)
+            L.set_suspend_status(
+                f"✓ saved screen {snap['screen_number'] or '?'}"
+                + (" (no suspend data yet!)" if empty else ""))
+
+    def _finish_tracking():
+        try:
+            (course_out / "scorm_api_log.json").write_text(
+                json.dumps(api_log, indent=1), encoding="utf-8")
+            summary = lms_tracking.summarize(api_log, screens)
+            txt = lms_tracking.format_summary(summary)
+            (course_out / "lms_tracking_summary.txt").write_text(
+                f"session {session_tag}\n{txt}\n", encoding="utf-8")
+            print("\n" + txt, flush=True)
+            print(f"tracking: timeline -> {track_log}", flush=True)
+        except Exception as e:  # noqa: BLE001 — never mask the QA session
+            print(f"tracking: couldn't write the summary ({e!r})", flush=True)
+
+    srv = CourseServer(course_dir, companion=companion, capture=bool(cap),
+                       tracking=True, seed=seed)
     try:
         with sync_playwright() as p:
             try:
@@ -293,8 +375,11 @@ def observe(args, cancel=None):
                 return 130
             print(f"\nREADY — drive the course yourself in the open window.")
             print(f"Screen changes are being logged to: {screens_log}")
-            print("Close the course window (or press Ctrl+C here) when you're done.\n",
+            print("Close the course window (or press Ctrl+C here) when you're done.",
                   flush=True)
+            print(f"LMS tracking (status/score/interactions) is logged to: {track_log}")
+            print("Use the panel's ‘Save suspend point’ button to snapshot the "
+                  f"course state; snapshots go to: {susp_dir}\n", flush=True)
             last = object()  # sentinel so the first real screen always logs
             settle = _Settle()  # per-screen text-stability tracker for base capture
             try:
@@ -318,6 +403,9 @@ def observe(args, cancel=None):
                         if cap:
                             settle.reset(cur)
 
+                    _poll_tracking(L)
+                    _save_suspend_points(L)
+
                     if cap:
                         # base capture: fire once the on-screen TEXT has stopped
                         # changing (timeline done). Never grabs a mid-animation
@@ -336,6 +424,12 @@ def observe(args, cancel=None):
             except KeyboardInterrupt:
                 print("\nstopping observe ...", flush=True)
             finally:
+                try:
+                    _poll_tracking(L)          # pick up anything since the last tick
+                    _save_suspend_points(L)
+                except Exception:  # noqa: BLE001
+                    pass
+                _finish_tracking()
                 if cap:
                     cap.finish()
                 try:
@@ -381,6 +475,10 @@ def main(argv=None, cancel=None):
                     help="observe: capture course screenshots for the course print — "
                          "base state auto-grabbed per screen, plus the panel's "
                          "‘Capture state’ button for layer states. Off by default.")
+    ap.add_argument("--resume-from", default=None,
+                    help="observe: relaunch the course from a suspend point saved "
+                         "with the panel's ‘Save suspend point’ button (a JSON "
+                         "file under <data-dir>/<course>/suspend_points/)")
     ap.add_argument("--shots-dir", default=None,
                     help="where --capture-shots writes images + shots_manifest.json "
                          "(default: <data-dir>/<course>/course_print_shots)")
@@ -468,6 +566,10 @@ def main(argv=None, cancel=None):
             rl = runlog.to_dict() if hasattr(runlog, "to_dict") else runlog
             (course_out / f"runlog_{sc['id']}.json").write_text(json.dumps(rl, indent=1))
             res = verify(sc, rl, rm)
+            res["lms_tracking"] = lms_tracking.summarize(
+                rl.get("scorm_log", []) or [],
+                {sid: {"slide_title": s.get("title", "")}
+                 for sid, s in rm.get("slides", {}).items()})
             results.append(res)
             c = res["counts"]
             log(f"          {c['VERIFIED_PASS']} pass / {c['VERIFIED_FAIL']} fail "

@@ -148,9 +148,110 @@ _CAPTURE_UI = r"""
 """
 
 
-def _build_launcher_html(seed_js: str, companion: dict | None, capture: bool = False) -> str:
+# --- LMS tracking readout + suspend-point button (observe mode) --------------
+# Live view of what the course has sent to the LMS (status, score,
+# interactions, commits) with the time and screen of each send, plus a button
+# that snapshots the current CMI state as a suspend point the reviewer can
+# relaunch from later. Reads the recording stub's own state on this window.
+
+_TRACKING_UI_TMPL = r"""
+<div id="lms-ui" style="position:fixed;right:16px;bottom:__BOTTOM__px;z-index:2147483646;
+ width:368px;box-sizing:border-box;font:12px/1.4 system-ui,Segoe UI,Arial,sans-serif;
+ background:#fff;color:#1a1a1a;border:1px solid #c9ccd3;border-radius:6px;
+ box-shadow:0 2px 8px rgba(0,0,0,.25)">
+  <div style="display:flex;align-items:center;justify-content:space-between;
+   background:#26303b;color:#fff;padding:5px 9px;border-radius:6px 6px 0 0">
+    <b>LMS tracking</b>
+    <span id="lms-toggle" style="cursor:pointer;color:#b7c4d1">hide</span>
+  </div>
+  <div id="lms-body" style="padding:6px 9px">
+    <div id="lms-rows"></div>
+    <div style="display:flex;align-items:center;gap:8px;margin-top:6px">
+      <button id="susp-btn" style="background:#2e86c1;color:#fff;border:0;border-radius:5px;
+       padding:6px 10px;font-weight:700;cursor:pointer">&#128190; Save suspend point</button>
+      <span id="susp-flash" style="color:#1e8449"></span>
+    </div>
+  </div>
+</div>
+<script>
+(function(){
+  var SCR = (window.__companion && window.__companion.slides) || {};
+  window.__suspendQueue = window.__suspendQueue || [];
+  var rows = document.getElementById('lms-rows');
+  var flash = document.getElementById('susp-flash');
+  var bodyEl = document.getElementById('lms-body');
+  document.getElementById('lms-toggle').addEventListener('click', function(){
+    var hid = bodyEl.style.display === 'none';
+    bodyEl.style.display = hid ? '' : 'none';
+    this.textContent = hid ? 'hide' : 'show';
+  });
+  function esc(t){ var d=document.createElement('div'); d.textContent=(t==null?'':String(t)); return d.innerHTML; }
+  function clock(ms){ var d=new Date(ms); function p(n){return (n<10?'0':'')+n;} return p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds()); }
+  function where(sid){ var s = sid && SCR[sid]; return s ? s.screen_number : (sid ? sid.slice(0,8)+'…' : 'launch'); }
+  function curSlide(){
+    try{
+      var doc = document.getElementById('course').contentDocument;
+      var vis = Array.prototype.filter.call(doc.querySelectorAll('.slide[class*="cs-"]'), function(s){
+        var cs = doc.defaultView.getComputedStyle(s), r = s.getBoundingClientRect();
+        return cs.display!=='none' && cs.visibility!=='hidden' && r.width>0; });
+      if(!vis.length) return null;
+      var m = vis[vis.length-1].className.match(/cs-([A-Za-z0-9_$]+)/); return m ? m[1] : null;
+    }catch(e){ return null; }
+  }
+  document.getElementById('susp-btn').addEventListener('click', function(){
+    var sid = curSlide();
+    window.__suspendQueue.push({t: Date.now(), slide: sid,
+      cmi: JSON.parse(JSON.stringify(window.__cmi || {}))});
+    flash.textContent = 'saving (screen ' + where(sid) + ')…';
+  });
+  window.__suspendSaved = function(msg){ flash.textContent = msg; };
+  var K04 = ['cmi.completion_status','cmi.success_status','cmi.score.raw','cmi.score.scaled'];
+  var K12 = ['cmi.core.lesson_status','cmi.core.score.raw'];
+  var lastLen = -1;
+  function render(){
+    var log = window.__scormLog || [];
+    if(log.length === lastLen) return; lastLen = log.length;
+    var is12 = log.some(function(e){ return /^LMS/.test(e.fn); });
+    var keys = is12 ? K12 : K04, last = {}, count = {}, inter = {}, commits = 0, term = null;
+    log.forEach(function(e){
+      if(e.fn==='Commit'||e.fn==='LMSCommit'){ commits++; return; }
+      if(e.fn==='Terminate'||e.fn==='LMSFinish'){ term = e; return; }
+      if(e.fn!=='SetValue' && e.fn!=='LMSSetValue') return;
+      var k = e.args[0];
+      if(keys.indexOf(k) >= 0){ last[k] = e; count[k] = (count[k]||0)+1; }
+      var m = /^cmi\.interactions\.(\d+)\.id$/.exec(k); if(m) inter[m[1]] = e;
+    });
+    var h = '';
+    keys.forEach(function(k){
+      var e = last[k], short = k.replace(/^cmi\.(core\.)?/, '');
+      h += '<div>' + esc(short) + ': ' + (e
+        ? '<b>' + esc(e.args[1]) + '</b> <span style="color:#666">at ' + clock(e.t) + ' on ' + esc(where(e.slide))
+          + (count[k] > 1 ? ' (' + count[k] + '×)' : '') + '</span>'
+        : '<span style="color:#999;font-style:italic">not sent yet</span>') + '</div>';
+    });
+    var ik = Object.keys(inter), le = ik.length ? inter[ik[ik.length-1]] : null;
+    h += '<div>interactions sent: <b>' + ik.length + '</b>' + (le ? ' <span style="color:#666">(last at '
+      + clock(le.t) + ' on ' + esc(where(le.slide)) + ')</span>' : '') + '</div>';
+    h += '<div style="color:#666">commits: ' + commits + (term ? ' • terminated at ' + clock(term.t) : '') + '</div>';
+    rows.innerHTML = h;
+  }
+  setInterval(render, 500); render();
+})();
+</script>
+"""
+
+
+def _tracking_ui(capture: bool) -> str:
+    # sit above the capture button stack when both are on
+    return _TRACKING_UI_TMPL.replace("__BOTTOM__", "150" if capture else "16")
+
+
+def _build_launcher_html(seed_js: str, companion: dict | None, capture: bool = False,
+                         tracking: bool = False) -> str:
     head = "<!doctype html><html><head><script>" + seed_js + STUB_JS + "</script>"
     cap_ui = _CAPTURE_UI if capture else ""
+    if tracking:
+        cap_ui += _tracking_ui(capture)
     if companion is None:
         return (head + "</head><body style='margin:0'>"
                 "<iframe id='course' src='/index_lms.html' "
@@ -177,7 +278,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         if self.path == "/__launch":
             b = self.launcher_html.encode()
             self.send_response(200)
-            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(b)))
             self.end_headers()
             self.wfile.write(b)
@@ -191,10 +292,13 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
 
 class CourseServer:
     def __init__(self, course_dir: str, port: int = 0, seed: dict | None = None,
-                 companion: dict | None = None, capture: bool = False):
-        seed_js = f"window.__scormSeed = {json.dumps(seed or {})};"
+                 companion: dict | None = None, capture: bool = False,
+                 tracking: bool = False):
+        seed_js = ("window.__scormSeed = "
+                   + json.dumps(seed or {}).replace("</", "<\\/") + ";")
         handler = type("H", (_Handler,), {
-            "launcher_html": _build_launcher_html(seed_js, companion, capture)
+            "launcher_html": _build_launcher_html(seed_js, companion, capture,
+                                                  tracking)
         })
         http.server.ThreadingHTTPServer.allow_reuse_address = True
         self.srv = http.server.ThreadingHTTPServer(
@@ -231,6 +335,31 @@ class Launched:
             return True
         except Exception:
             return False
+
+    def scorm_log_since(self, start: int) -> list:
+        """API transcript entries from index ``start`` on (for incremental
+        polling). Empty list if the page is gone."""
+        try:
+            return self.page.evaluate(
+                "(i) => (window.__scormLog || []).slice(i)", start) or []
+        except Exception:
+            return []
+
+    def drain_suspend_queue(self) -> list:
+        """Return and clear suspend-point requests from the panel button.
+        Each carries the CMI snapshot taken at click time."""
+        try:
+            return self.page.evaluate(
+                "() => (window.__suspendQueue ? window.__suspendQueue.splice(0) : [])")
+        except Exception:
+            return []
+
+    def set_suspend_status(self, text: str) -> None:
+        try:
+            self.page.evaluate(
+                "(s) => { if (window.__suspendSaved) window.__suspendSaved(s); }", text)
+        except Exception:
+            pass
 
     def drain_capture_queue(self) -> list:
         """Return and clear any manual-capture requests queued by the panel
