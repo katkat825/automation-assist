@@ -155,3 +155,25 @@ def test_keep_existing_reasons_from_pdf_text():
     pdf = cc.ParseResult(source="sow.pdf", text="All other courses will remain the same for the term.")
     assert rm.keep_existing_reasons([], [pdf]) == ['sow.pdf: "All other courses will remain".']
     assert rm.keep_existing_reasons([], [cc.ParseResult(source="x", text="Renewal")]) == []
+
+
+def test_change_order_removes_only_what_the_archive_text_names_and_keeps_the_rest():
+    # Change Order ticks Keep existing courses, so only numbers under Archive and Remove are ticked.
+    tables = [UPGRADE_TABLES[0], [["Archive and Remove", "10133 and 10134"]]]
+    pdf = _pdf(tables)
+    plan = rm.plan_removals(pdf.courses, PORTAL, rm.change_notes([pdf]), keep_existing=True)
+    assert plan.ticked == {"10133", "10134"}
+    keep = {c.number for c in plan.candidates} - plan.ticked
+    result = cc.compare(pdf.courses, PORTAL, keep=keep, reset=False)
+    assert result.archive_reset == []
+    assert sorted(c.number for c in result.archive_remove) == ["10133", "10134"]
+    assert {c.number for c in result.kept} == keep
+
+
+def test_change_order_with_nothing_named_removes_nothing():
+    pdf = _pdf([UPGRADE_TABLES[0]])
+    plan = rm.plan_removals(pdf.courses, PORTAL, rm.change_notes([pdf]), keep_existing=True)
+    assert plan.ticked == set()
+    result = cc.compare(pdf.courses, PORTAL, keep={c.number for c in plan.candidates}, reset=False)
+    assert result.archive_remove == [] and result.archive_reset == []
+    assert len(result.kept) == len(PORTAL)

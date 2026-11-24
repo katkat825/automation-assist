@@ -86,6 +86,10 @@ SOW, ESTIMATE, UNKNOWN = "SOW", "Estimate", "Unknown"
 _ESTIMATE_RE = re.compile(r"\bEstimate\s+(\d{3,})\b")           # QuickBooks header
 _PANDADOC_RE = re.compile(r"\bDocument Ref:|\bPrepared for:")    # PandaDoc page stamp / cover
 _PREPARED_FOR_RE = re.compile(r"Prepared for:\s*\n?\s*(.+)")
+# Whoever filled out the PandaDoc SOW ("Prepared by:\nNatalie Williams"), else the
+# estimate's SALES REP (first word of the line under the header).
+_PREPARED_BY_RE = re.compile(r"Prepared by:\s*\n?\s*(.+)")
+_ESTIMATE_REP_RE = re.compile(r"SALES REP\s+OD POC[^\n]*\n\s*([A-Za-z][\w'’.-]*)")
 # Estimate header "SALES REP  OD POC  OD URL" and the line under it:
 # "Natalie Williams callen@princeton.com Princeton.glsondemand.com". OD URL may be
 # missing, a bare subdomain ("Vibrenthealth") or "NA SCORM".
@@ -106,7 +110,14 @@ _DESCRIPTION_HEADER_RE = re.compile(r"^description$", re.I)
 # don't. Based on the 16842 example; widen if other license SKUs show up.
 LICENSE_SKU_PREFIXES = ("CL-",)
 
-RENEWAL, NEW_ACCOUNT = "Renewal", "New Account"
+RENEWAL, NEW_ACCOUNT, CHANGE_ORDER = "Renewal", "New Account", "Change Order"
+# Chubb Policyholder: a complimentary Chubb Cyber Training registration. Comes as
+# an email only (no PDFs) and needs a portal creation and a customer notification.
+CHUBB_POLICYHOLDER = "Chubb Policyholder"
+# Change orders aren't detected from the PDFs (no standard wording seen yet):
+# they're chosen by hand in the Order details step. A change order keeps the
+# client's other courses, archives and removes only what it replaces, never
+# archives and resets, and needs no QuickBooks estimate or order number.
 # SOW title: "2026 RENEWAL PROPOSAL", "YEAR 2/3 RENEWAL PROPOSAL", "RENEWAL INVOICE".
 _RENEWAL_TITLE_RE = re.compile(r"\bRENEWAL\s+(?:PROPOSAL|INVOICE)\b")
 # Estimate note "New Client", or the new-client Organization Information form in the SOW.
@@ -117,7 +128,7 @@ _COMMS_TOOLBOX_RE = re.compile(r"\bCommunications?\s+Tool(?:box|kit)\b", re.I)
 
 GLS_HOSTED, SELF_HOSTED = "GLS-Hosted", "Self-Hosted"
 PHISHFIREWALL_HOSTED = "PhishFirewall-Hosted"   # PhishFirewall runs both phishing and the LMS
-ORDER_TYPES = (RENEWAL, NEW_ACCOUNT)
+ORDER_TYPES = (RENEWAL, NEW_ACCOUNT, CHANGE_ORDER, CHUBB_POLICYHOLDER)
 HOSTING_OPTIONS = (GLS_HOSTED, SELF_HOSTED, PHISHFIREWALL_HOSTED)
 # No SOW standard for PhishFirewall orders yet. 16849 (West Michigan) only says
 # "AI-Managed Phishing", so that wording counts as a sign too.
@@ -195,6 +206,24 @@ def _cell(row: list[str], col: Optional[int]) -> str:
     return cc.clean_text(row[col]) if col is not None and col < len(row) else ""
 
 
+# Customization: the SRV-CUSB SKU, or "Customization" in the text. Used when the
+# SKU isn't found in a SKU table (the table layout wasn't read, or there's no SKU).
+CUSTOMIZATION_SKU_PREFIXES = ("SRV-CUS",)
+_CUSTOMIZATION_TEXT_RE = re.compile(r"\bSRV-\s?CUS\w*|\bCustomi[sz]ation\b", re.I)
+
+
+def customization_lines(pdfs: Iterable[cc.ParseResult]) -> list[tuple[str, str]]:
+    """(line, source) for every PDF line that mentions customization, once each."""
+    out, seen = [], set()
+    for p in pdfs:
+        for raw in p.text.splitlines():
+            line = cc.clean_text(raw)
+            if line and _CUSTOMIZATION_TEXT_RE.search(line) and line.casefold() not in seen:
+                seen.add(line.casefold())
+                out.append((line, p.source))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Check
 # ---------------------------------------------------------------------------
@@ -216,7 +245,7 @@ class OrderCheck:
     # Read once here so the task list doesn't re-derive them.
     email: OrderEmail = field(default_factory=OrderEmail)
     order_number: str = ""
-    order_type: str = ""                 # RENEWAL / NEW_ACCOUNT / "" (not detected)
+    order_type: str = ""                 # RENEWAL / NEW_ACCOUNT / CHANGE_ORDER / "" (not set)
     sow_users: Optional[int] = None      # license count on the SOW's first CL- line
     portal_users: Optional[int] = None   # license count on the pasted portal list
     company: str = ""                    # email Full Company Name, else SOW Prepared for
@@ -232,6 +261,9 @@ class OrderCheck:
     estimate_sources: list[str] = field(default_factory=list)  # SKUs here were actually bought
     has_comms_toolbox: bool = False      # the SOW lists the Communications Toolbox
     has_phishfirewall: bool = False      # "PhishFirewall" appears in the SOW or estimate
+    customization_text: list[tuple[str, str]] = field(default_factory=list)  # (line, source)
+    sales_rep: str = ""                  # full name: SOW Prepared by, else estimate SALES REP
+    policyholder: dict[str, str] = field(default_factory=dict)  # Chubb email: key -> value
 
 
 def check_order(email_text: str, pdfs: Iterable[cc.ParseResult],
@@ -240,6 +272,8 @@ def check_order(email_text: str, pdfs: Iterable[cc.ParseResult],
     """``order_type`` / ``hosting``: chosen by hand in the Order details step;
     they replace what was detected."""
     pdfs = list(pdfs)
+    if order_type == CHUBB_POLICYHOLDER or (not order_type and is_policyholder_email(email_text)):
+        return _check_policyholder(email_text, hosting)
     email = parse_order_email(email_text)
     out = OrderCheck(email=email, sources=[p.source for p in pdfs if p.source])
 
@@ -250,6 +284,7 @@ def check_order(email_text: str, pdfs: Iterable[cc.ParseResult],
     out.has_comms_toolbox = any(_COMMS_TOOLBOX_RE.search(p.text) for p in by_kind[SOW])
     out.has_phishfirewall = any(PHISHFIREWALL_RE.search(p.text)
                                 for p in by_kind[SOW] + by_kind[ESTIMATE])
+    out.customization_text = customization_lines(by_kind[SOW] + by_kind[ESTIMATE] + by_kind[UNKNOWN])
 
     # -- what's missing --------------------------------------------------
     if not email_text.strip():
@@ -260,7 +295,8 @@ def check_order(email_text: str, pdfs: Iterable[cc.ParseResult],
             out.warnings.append("Order email is missing: " + ", ".join(missing) + ".")
     if not by_kind[SOW]:
         out.warnings.append("No PandaDoc SOW among the PDFs.")
-    if not by_kind[ESTIMATE]:
+    # Change orders don't come with a QuickBooks estimate (or need its order number).
+    if not by_kind[ESTIMATE] and order_type != CHANGE_ORDER:
         out.warnings.append("No QuickBooks estimate among the PDFs.")
     for p in by_kind[UNKNOWN]:
         out.warnings.append(f"{p.source}: couldn't tell whether this is the SOW or the estimate. "
@@ -301,6 +337,13 @@ def check_order(email_text: str, pdfs: Iterable[cc.ParseResult],
     estimate_urls = [(portal_url(u), u, src) for _, u, src in contacts]
     out.portal_url = email_url or next((u for u, _, _ in estimate_urls if u), "")
     out.company = email.fields.get("company", "") or next((v for v, _ in prepared_for), "")
+    reps = [(cc.clean_text(m.group(1)), p.source) for p in by_kind[SOW]
+            for m in [_PREPARED_BY_RE.search(p.text)] if m]
+    reps += [(m.group(1), p.source) for p in by_kind[ESTIMATE]
+             for m in [_ESTIMATE_REP_RE.search(p.text)] if m]
+    if reps:
+        out.sales_rep = reps[0][0]
+        out.facts.append(Fact("Sales rep", reps[0][0], reps[0][1]))
     out.poc = email.fields.get("training_poc", "") or next((poc for poc, _, _ in contacts), "")
 
     for p in by_kind[SOW] + by_kind[ESTIMATE]:
@@ -339,6 +382,81 @@ def check_order(email_text: str, pdfs: Iterable[cc.ParseResult],
     for name, src in prepared_for:
         if company and not _names_overlap(company, name):
             out.warnings.append(f"Company name differs: {company} (Order email) vs {name} ({src}).")
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Chubb Policyholder email
+# ---------------------------------------------------------------------------
+
+# The registration email puts each label on its own line and the value on the
+# next. (key, label shown, pattern for the label line). First match wins.
+POLICYHOLDER_FIELDS = (
+    ("region", "Region", r"^your region$"),
+    ("company", "Policyholder's name", r"^policyholder'?s name$"),
+    ("admin_name", "Administrator POC name", r"^administrator poc name$"),
+    ("admin_email", "Administrator POC email", r"^administrator poc email$"),
+    ("stakeholder_phone", "Stakeholder phone", r"^security awareness training stakeholder'?s phone"),
+    ("stakeholder_email", "Stakeholder email", r"^security awareness training stakeholder'?s email$"),
+    ("stakeholder_name", "Stakeholder", r"^security awareness training stakeholder$"),
+    ("package", "Package", r"^chubb cyber training packages?$"),
+    ("users", "Total number of users", r"^total number of users$"),
+)
+_REQUIRED_POLICYHOLDER = ("company", "admin_name", "admin_email", "users")
+_POLICYHOLDER_SIGN_RE = re.compile(r"^\s*Policyholder'?s Name\s*:?\s*$", re.I | re.M)
+
+
+def is_policyholder_email(text: str) -> bool:
+    return bool(_POLICYHOLDER_SIGN_RE.search(text.replace("’", "'")))
+
+
+def parse_policyholder_email(text: str) -> dict[str, str]:
+    """Label line, then value line ("Label: value" on one line works too)."""
+    out: dict[str, str] = {}
+    pending = None
+    for raw in text.replace("’", "'").splitlines():
+        line = cc.clean_text(raw)
+        if not line:
+            continue
+        label, _, value = line.partition(":")
+        key = next((k for k, _, pat in POLICYHOLDER_FIELDS
+                    if re.search(pat, label.strip(), re.I)), None)
+        if key:
+            pending = None
+            if value.strip():
+                out.setdefault(key, value.strip())
+            else:
+                pending = key
+        elif pending:
+            out.setdefault(pending, line)
+            pending = None
+    return out
+
+
+def _check_policyholder(email_text: str, hosting: str = "") -> OrderCheck:
+    fields = parse_policyholder_email(email_text)
+    detected = is_policyholder_email(email_text)
+    out = OrderCheck(order_type=CHUBB_POLICYHOLDER, policyholder=fields,
+                     detected_order_type=CHUBB_POLICYHOLDER if detected else "",
+                     order_type_source="the Policyholder's Name field in the pasted email" if detected else "",
+                     hosting=hosting or GLS_HOSTED, detected_hosting=GLS_HOSTED,
+                     hosting_source="Chubb Policyholder portals are GLS-hosted")
+    out.facts.append(Fact("Order type", CHUBB_POLICYHOLDER, "Policyholder email" if detected else CHOSEN))
+    out.facts.append(Fact("Hosting", out.hosting, out.hosting_source if not hosting else CHOSEN))
+    for key, label, _ in POLICYHOLDER_FIELDS:
+        if fields.get(key):
+            out.facts.append(Fact(label, fields[key], "Policyholder email"))
+    out.company = fields.get("company", "")
+    out.poc = ", ".join(x for x in (fields.get("admin_name", ""), fields.get("admin_email", "")) if x)
+    users = fields.get("users", "")
+    out.sow_users = int(users) if users.isdigit() else None
+    if not email_text.strip():
+        out.warnings.append("No Policyholder email pasted.")
+    else:
+        labels = {k: label for k, label, _ in POLICYHOLDER_FIELDS}
+        missing = [labels[k] for k in _REQUIRED_POLICYHOLDER if not fields.get(k)]
+        if missing:
+            out.warnings.append("Policyholder email is missing: " + ", ".join(missing) + ".")
     return out
 
 

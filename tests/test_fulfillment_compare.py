@@ -487,3 +487,20 @@ def test_user_count_in_pricing_table_is_not_a_course():
              ["CL-BD_CUST", "AI-Managed Phishing + Awareness Package", "$5.50", "3768"]]
     cc.add_sku_table_courses(r, [table], "p.pdf")
     assert r.courses == []
+
+
+def test_change_order_keeps_courses_without_archive_and_reset():
+    pdf = [_c("Spot the Vish 11564"), _c("Slay The Scam 10781")]
+    portal = [_c("Slay The Scam 10781", "Portal"), _c("GDPR Essentials 10983", "Portal"),
+              _c("OWASP 2021 Module 03: Injection 10136", "Portal")]
+    r = cc.compare(pdf, portal, keep=["10983"], reset=False)
+    assert r.archive_reset == []
+    assert cc.format_numbers(r.kept) == "10983, 10781"   # on both, plus kept by hand
+    assert cc.format_numbers(r.archive_remove) == "10136"
+    assert cc.format_numbers(r.to_add) == "11564"
+    assert [c.number for c in cc.final_courses(r)] == ["10983", "10781", "11564"]
+
+
+def test_renewal_has_no_kept_list():
+    r = cc.compare([_c("Slay The Scam 10781")], [_c("Slay The Scam 10781", "Portal")])
+    assert r.kept == [] and cc.format_numbers(r.archive_reset) == "10781"

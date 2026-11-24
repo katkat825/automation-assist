@@ -199,3 +199,64 @@ def test_missing_inputs_are_warned():
 def test_sku_with_underscore_part():
     table = [["SKU", "Description", "Total Users"], ["CL-BD_CUST", "AI-Managed Phishing", "3768"]]
     assert [(s.sku, s.users) for s in oc.sku_lines([table], "sow.pdf")] == [("CL-BD_CUST", 3768)]
+
+
+def test_change_order_is_an_option_chosen_by_hand():
+    assert oc.ORDER_TYPES[:3] == (oc.RENEWAL, oc.NEW_ACCOUNT, oc.CHANGE_ORDER)
+    sow = _sow()
+    sow.text = "RENEWAL INVOICE\n" + sow.text
+    r = oc.check_order(EMAIL, [sow, _estimate()], order_type=oc.CHANGE_ORDER)
+    assert r.order_type == oc.CHANGE_ORDER
+    assert r.detected_order_type == oc.RENEWAL
+    assert _fact(r, "Order type", oc.CHOSEN) == oc.CHANGE_ORDER
+
+
+# ---------------------------------------------------------------------------
+# Chubb Policyholder email and sales rep
+# ---------------------------------------------------------------------------
+
+POLICYHOLDER_EMAIL = """Your Region
+North America (United States, Canada)
+Policyholder's Name
+Example Holdings LLC
+Administrator POC Name
+Jordan Smith
+Administrator POC Email
+jsmith@example.com
+Security Awareness Training Stakeholder
+Casey Jones
+Security Awareness Training Stakeholder's Email
+cjones@example.com
+Security Awareness Training Stakeholder's Phone Number
++15555550100
+Chubb Cyber Training Packages
+Over 50 users Package
+Total Number of Users
+75
+"""
+
+
+def test_policyholder_email_is_detected_and_read_without_pdfs():
+    r = oc.check_order(POLICYHOLDER_EMAIL, [])
+    assert r.order_type == oc.CHUBB_POLICYHOLDER == r.detected_order_type
+    assert r.policyholder["stakeholder_name"] == "Casey Jones"
+    assert r.policyholder["stakeholder_email"] == "cjones@example.com"
+    assert r.policyholder["stakeholder_phone"] == "+15555550100"
+    assert r.policyholder["package"] == "Over 50 users Package"
+    assert (r.company, r.poc, r.sow_users) == ("Example Holdings LLC", "Jordan Smith, jsmith@example.com", 75)
+    assert r.hosting == oc.GLS_HOSTED
+    assert r.warnings == []   # no SOW / estimate / order-email warnings
+
+
+def test_policyholder_chosen_by_hand_warns_about_missing_fields():
+    r = oc.check_order("Policyholder's Name: Example Holdings LLC", [], order_type=oc.CHUBB_POLICYHOLDER)
+    assert r.company == "Example Holdings LLC"
+    assert r.warnings == ["Policyholder email is missing: Administrator POC name, "
+                          "Administrator POC email, Total number of users."]
+
+
+def test_sales_rep_from_sow_prepared_by_else_estimate():
+    sow = _sow()
+    sow.text += "\nPrepared by:\nNatalie Williams"
+    assert oc.check_order(EMAIL, [sow, _estimate()]).sales_rep == "Natalie Williams"
+    assert oc.check_order(EMAIL, [_sow(), _estimate()]).sales_rep == "Sam"

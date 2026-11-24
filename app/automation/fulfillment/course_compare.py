@@ -26,6 +26,9 @@ portal ("&" vs "and", capitalisation, etc.), numbers don't.
 * archive_remove  on the portal, not on the PDF
 * archive_reset   on both, plus portal-only courses the user chose to keep
                   (a change order that only lists what's changing)
+* kept            change orders only (reset=False): the same courses as
+                  archive_reset would hold, but they stay as they are, so
+                  archive_reset is empty
 * review          anything that could not be placed with confidence (portal
                   items with no number, year-like
                   numbers, lines in the PDF
@@ -161,6 +164,8 @@ class Comparison:
     # Portal-only courses on a demo license: removed by Fulfillment, not part
     # of the archive ticket.
     demo_remove: list[Course] = field(default_factory=list)
+    # Change order: courses that stay on the portal untouched (no archive and reset).
+    kept: list[Course] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -745,15 +750,18 @@ def name_key(name: str) -> str:
 
 
 def compare(pdf_courses: Iterable[Course], portal_courses: Iterable[Course],
-            review: Iterable[ReviewItem] = (), keep: Iterable[str] = ()) -> Comparison:
+            review: Iterable[ReviewItem] = (), keep: Iterable[str] = (),
+            reset: bool = True) -> Comparison:
     """``keep``: numbers of portal-only courses to archive and reset instead of
-    archive and remove (chosen by hand when the PDF only lists what's changing)."""
+    archive and remove (chosen by hand when the PDF only lists what's changing).
+    ``reset``: False for a change order: the courses that would be archived and
+    reset are left as they are and listed in ``kept`` instead."""
     keep = set(keep)
     pdf_by = {c.number: c for c in pdf_courses}
     portal_by = {c.number: c for c in portal_courses}
     review = list(review)
 
-    to_add, remove, reset, demo = [], [], [], []
+    to_add, remove, kept, demo = [], [], [], []
 
     for num, c in pdf_by.items():
         if num in portal_by:
@@ -763,7 +771,7 @@ def compare(pdf_courses: Iterable[Course], portal_courses: Iterable[Course],
                 to_add.append(replace(c, note=", ".join(
                     x for x in (c.note, f"demo license ({DEMO_LICENSE_COUNT}) on portal") if x)))
             else:
-                reset.append(portal_c)
+                kept.append(portal_c)
         elif is_year_like(num):
             review.append(ReviewItem(c.name, c.source,
                 f"{num} looks like a year. Confirm it's really a course number."))
@@ -774,7 +782,7 @@ def compare(pdf_courses: Iterable[Course], portal_courses: Iterable[Course],
         if num in pdf_by:
             continue
         if num in keep:
-            reset.append(c)
+            kept.append(c)
         elif c.license_count == DEMO_LICENSE_COUNT:
             demo.append(c)
         else:
@@ -793,18 +801,21 @@ def compare(pdf_courses: Iterable[Course], portal_courses: Iterable[Course],
         if best is not None and best_ratio >= 0.85:
             replacements.append((a, best))
 
+    stay = _sort_by_name(kept)
     return Comparison(
         to_add=_sort_by_name(to_add),
         archive_remove=_sort_by_name(remove),
-        archive_reset=_sort_by_name(reset),
+        archive_reset=stay if reset else [],
         review=review,
         possible_replacements=replacements,
         demo_remove=_sort_by_name(demo),
+        kept=[] if reset else stay,
     )
 
 
 def final_courses(r: Comparison) -> list[Course]:
     """What the portal will have once the lists are done: the adds plus the
-    archive-and-resets (including portal-only courses kept by hand), by name.
+    archive-and-resets (including portal-only courses kept by hand) or, for a
+    change order, the kept courses, by name.
     Review items aren't included; they haven't been placed."""
-    return _sort_by_name(r.to_add + r.archive_reset)
+    return _sort_by_name(r.to_add + r.archive_reset + r.kept)

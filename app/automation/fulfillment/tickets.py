@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Optional
 
 from . import course_compare as cc
 from . import order_check as oc
@@ -30,6 +30,9 @@ class Ticket:
 
 
 def subject(check: oc.OrderCheck, kind: str) -> str:
+    """A change order doesn't need an order number: it's left out when there isn't one."""
+    if not check.order_number and check.order_type == oc.CHANGE_ORDER:
+        return f"{check.company or '[company]'}: {kind}"
     return f"{check.order_number or '[order #]'}: {check.company or '[company]'}: {kind}"
 
 
@@ -61,18 +64,33 @@ def license_count(check: oc.OrderCheck) -> Ticket:
                    [f"License Change: {verb} license count to {check.sow_users}"])
 
 
-def archive(check: oc.OrderCheck, reset: list[cc.Course], remove: list[cc.Course],
+def archive(check: oc.OrderCheck, reset: Optional[list[cc.Course]], remove: list[cc.Course],
             also_remove: Iterable[str] = (), requested: str = "",
             other: Iterable[str] = (), date_tbd: bool = False) -> Ticket:
     """``also_remove``: items without course numbers (an assessment) added to the remove list.
-    ``date_tbd``: the SOW has an archive section but no date yet."""
+    ``date_tbd``: the SOW has an archive section but no date yet.
+    ``reset``: None leaves the Archive and Reset line out (change orders never reset)."""
     lines = ([f"DELAYED ARCHIVE: {requested}"] if requested
              else ["Delayed Archive Date: TBD"] if date_tbd else [])
     remove_items = [x for x in [cc.format_numbers(remove), *also_remove] if x]
-    lines.append("Archive and Reset:\n" + (cc.format_numbers(reset) or "none"))
+    if reset is not None:
+        lines.append("Archive and Reset:\n" + (cc.format_numbers(reset) or "none"))
     lines.append("Archive and Remove:\n" + (", ".join(remove_items) or "none"))
     lines.extend(other)
     return _ticket(check, "Archive", lines)
+
+
+def customization(check: oc.OrderCheck, lines: Iterable[str], courses: Iterable[str] = (),
+                  items: Iterable[str] = (), hours: str = "") -> Ticket:
+    """``lines``: the SKU line (or the PDF lines that mention customization).
+    What's wanted and the hours may not be given; that's said plainly rather than
+    bracketed, since there's often nothing more to find."""
+    courses, items = list(courses), list(items)
+    body = list(lines)
+    body.append("Course: " + (", ".join(courses) if courses else "[course #?]"))
+    body.append("Customization: " + (", ".join(items) if items else "not specified on the SOW"))
+    body.append(f"Hours budgeted: {hours}" if hours else "Hours budgeted: not stated")
+    return _ticket(check, "Customization", body, with_url=True)
 
 
 def scorm(check: oc.OrderCheck, sku: oc.SkuLine) -> Ticket:
@@ -165,6 +183,68 @@ def customer_notification(check: oc.OrderCheck) -> Ticket:
         "Thanks again for choosing OnDemand!\n\n"
         "GLS Delivery Team"
     ))
+
+
+# Chubb Policyholder welcome (docs/working_notes/policyholder.md). Arnie Walker is
+# the program's point of contact in the template itself, not a field from the email.
+CHUBB_SUBJECT = "Action Required: Schedule Your Program Onboarding Session"
+_CHUBB_REPLY = (
+    "Thank you for registering for the complimentary Chubb Cyber Awareness Training Program. "
+    "Your training portal is now ready, and we're excited to help you launch a successful "
+    "cybersecurity awareness program.\n\n"
+    "Your Next Step: Program Onboarding Session\n\n"
+    "If you haven't already scheduled your Program Onboarding Session, please do so using the "
+    "link below. We recommend reserving your onboarding appointment within 5 days of registration "
+    "to keep your implementation on track and help ensure a smooth launch.\n\n"
+    "During your Program Onboarding Session, Arnie Walker, your primary point of contact, will "
+    "help you prepare your program for launch by:\n\n"
+    "- Importing your users (via CSV or reviewing SSO integration)\n"
+    "- Reviewing IP configuration and email safelisting requirements\n"
+    "- Reviewing your employee welcome messaging and launch communications\n"
+    "- Sharing best practices for a successful rollout\n"
+    "- Answering any questions before you launch\n\n"
+    "📅 Schedule Your Program Onboarding Session: Arnie's Calendar\n\n"
+    "How to Access Your Training Portal\n\n"
+    "Website:\n{website}\n\n"
+    "Username:\n{username}\n\n"
+    "If you need your password, simply click Reset Password on the login page.\n\n"
+    "After You Log In\n"
+    "- Open the Admin Dashboard.\n"
+    "- Click Show Page Help in the title bar to access helpful videos and support articles.\n"
+    "- Your assigned course(s) are already loaded and ready to launch.\n"
+    "- Your course(s) have been assigned to the Everyone group. Any new users you add will "
+    "automatically be included. You may create additional groups at any time to better organize "
+    "your learners.\n\n"
+    "Need Assistance?\n\n"
+    "Additional help is always available through the Frequently Asked Questions (FAQ) within your "
+    "training portal.\n\n"
+    "If you have questions before your Program Onboarding Session or need assistance at any point, "
+    "we're here to help.\n\n"
+    "Thank you for participating in the complimentary Chubb Cyber Awareness Training Program. We "
+    "look forward to helping you build a stronger security culture.\n\n"
+    "Best regards,\n"
+    "GLS Delivery Team\n\n\n"
+    "Looking to Expand Your Program?\n"
+    "As your cybersecurity program evolves, Global Learning Systems offers additional solutions to "
+    "help organizations strengthen security awareness and reduce human risk, including:\n"
+    "- AI-powered phishing simulations\n"
+    "- Role-based security awareness training\n"
+    "- Secure Coding training for developers\n"
+    "- Compliance training\n"
+    "- Managed security awareness services\n"
+    "- Custom learning solutions\n\n"
+    "If you'd like to learn more about these solutions, simply ask Arnie during your Program "
+    "Onboarding Session or visit www.globallearningsystems.com to learn more."
+)
+
+
+def chubb_notification(check: oc.OrderCheck) -> Ticket:
+    """Chubb Policyholder welcome. The portal is new, so its URL is usually not
+    known yet and shows as [portal URL?]."""
+    email = check.policyholder.get("admin_email", "")
+    reply = _CHUBB_REPLY.format(website=_portal_link(check), username=email or "[admin email?]")
+    return Ticket(subject=CHUBB_SUBJECT, body="\n\n".join(_header(check)),
+                  reply=_hello(check) + reply, options=_NOTIFY_OPTIONS)
 
 
 def first_name(poc: str) -> str:

@@ -89,7 +89,8 @@ def test_self_hosted_new_account_gets_scorm_and_comms_but_no_portal_work():
     est = _estimate(tables=scorm, url="NA SCORM")
     est.text += "\nNew Client"
     plan = _plan(email="", sow=_sow(tables=[]), estimate=est, with_courses=False)
-    assert _titles(plan) == ["SCORM delivery", "Communication materials", "Customer notification"]
+    assert _titles(plan) == ["SCORM delivery", "Communication materials", "Implementation",
+                             "Customer notification"]
     welcome = _task(plan, "Customer notification").ticket
     assert welcome.subject.startswith("Welcome to Global Learning Systems!")
     assert "SCORM course packages" in welcome.reply
@@ -256,3 +257,188 @@ def test_gls_hosted_welcome_has_portal_url():
     t = _task(ft.build_plan(_check(order_type=oc.NEW_ACCOUNT), None), "Customer notification").ticket
     assert t.subject == "Welcome to GLS OnDemand! Order #16842"
     assert t.reply.startswith("Hello Pat,") and "URL: https://example.glsondemand.com" in t.reply
+
+
+# ---------------------------------------------------------------------------
+# Change order
+# ---------------------------------------------------------------------------
+
+def _change_plan(sow=None, estimate=None, keep=()):
+    portal = cc.parse_portal_list(PORTAL)
+    check = oc.check_order(EMAIL, [sow or _renewal_sow(), estimate or _estimate()], portal,
+                           order_type=oc.CHANGE_ORDER)
+    pdf = [cc.Course("11594", "Anti-Phishing Essentials 11594")]
+    comparison = cc.compare(pdf, portal.courses, portal.review, keep=keep, reset=False)
+    return ft.build_plan(check, comparison)
+
+
+def test_change_order_with_nothing_removed_has_no_archive_ticket():
+    plan = _change_plan(sow=_renewal_sow([SOW_TABLES[0]]), keep={"10922", "10781"})
+    assert "Course archive" not in _titles(plan)
+    assert "Add courses" in _titles(plan)
+
+
+def test_change_order_archive_ticket_is_archive_and_remove_only():
+    plan = _change_plan(keep={"10781"})
+    body = _task(plan, "Course archive").ticket.body
+    assert "Archive and Reset" not in body
+    assert "Archive and Remove:\n10922, SecureGenius®: CyberSecurity Awareness Assessment" in body
+    assert body.startswith("Change Order\n\nGLS-Hosted")
+
+
+def test_change_order_subject_needs_no_order_number():
+    no_number = _estimate()
+    no_number.text = no_number.text.replace("Estimate 16842\n", "")
+    t = _task(_change_plan(estimate=no_number, keep={"10781"}), "Course archive").ticket
+    assert t.subject == "Example Co (EXC): Archive"
+    # A number that is there is still used.
+    t = _task(_change_plan(keep={"10781"}), "Course archive").ticket
+    assert t.subject == "16842: Example Co (EXC): Archive"
+
+
+def test_change_order_customer_notification_is_written_by_hand():
+    task = _task(_change_plan(keep={"10781"}), "Customer notification")
+    assert task.ticket is None and "by hand" in task.confirm
+    # Included for self-hosted change orders too.
+    scorm = [[["SKU", "Description", "Total Users"], ["DL-SCR", "Delivery: SCORM", "1"]]]
+    plan = _change_plan(sow=_sow(tables=scorm), estimate=_estimate(tables=scorm, url="NA SCORM"),
+                        keep={"10781"})
+    assert "Customer notification" in _titles(plan)
+
+
+def test_change_order_skips_exp_date_and_needs_no_estimate():
+    portal = cc.parse_portal_list(PORTAL)
+    check = oc.check_order(EMAIL, [_renewal_sow()], portal, order_type=oc.CHANGE_ORDER)
+    assert not any("QuickBooks estimate" in w for w in check.warnings)
+    sow = [SOW_TABLES[0] + [["DL-SSO", "Single Sign On: Azure AD", "$0", "1", "$0"]], SOW_TABLES[1]]
+    check = oc.check_order(EMAIL, [_renewal_sow(sow)], portal, order_type=oc.CHANGE_ORDER)
+    plan = ft.build_plan(check, None)
+    assert "Update portal expiration date" not in _titles(plan)
+    assert _task(plan, "SSO").confirm == ""   # SOW-only isn't "optional" without an estimate
+    # A renewal without an estimate still warns.
+    assert any("QuickBooks estimate" in w
+               for w in oc.check_order(EMAIL, [_renewal_sow()], portal).warnings)
+
+
+# ---------------------------------------------------------------------------
+# Customization
+# ---------------------------------------------------------------------------
+
+def _custom_plan(row=None, text=""):
+    sow = _renewal_sow([SOW_TABLES[0] + ([row] if row else []), SOW_TABLES[1]])
+    sow.text += text
+    return _plan(sow=sow)
+
+
+def test_customization_ticket_from_sku_with_course_item_and_hours():
+    plan = _custom_plan(["SRV-CUSB", "Customization: PA Screen for course 10781, 4 hours", "$0", "1", "$0"])
+    task = _task(plan, "Customization")
+    assert task.handled_by == ft.CUSTOMIZATION
+    t = task.ticket
+    assert t.subject == "16842: Example Co (EXC): Customization"
+    assert t.body.startswith("Renewal\n\nGLS-Hosted\n\nPOC: Pat Lee, plee@example.com\n\nexample.glsondemand.com")
+    assert "SRV-CUSB: Customization: PA Screen for course 10781, 4 hours" in t.body
+    assert "Course: 10781" in t.body
+    assert "Customization: PA Screen" in t.body
+    assert "Hours budgeted: 4" in t.body
+    assert t.attachments == ("sow.pdf", "est.pdf")
+
+
+def test_customization_without_details_says_so():
+    t = _task(_custom_plan(["SRV-CUSB", "Customization", "$0", "1", "$0"]), "Customization").ticket
+    assert "Course: [course #?]" in t.body
+    assert "Customization: not specified on the SOW" in t.body
+    assert "Hours budgeted: not stated" in t.body
+
+
+def test_customization_found_from_description_without_the_sku():
+    row = ["SRV-OTHER", "Customization: Policy Acknowledgement 10922", "$0", "1", "$0"]
+    t = _task(_custom_plan(row), "Customization").ticket
+    assert "Course: 10922" in t.body and "Customization: Policy Acknowledgement" in t.body
+
+
+def test_customization_found_from_pdf_text_when_no_sku_line_is_read():
+    task = _task(_custom_plan(text="\nSRV-CUSB Customization: PA Screens for 10781"), "Customization")
+    assert "PDF text" in task.confirm
+    assert "Course: 10781" in task.ticket.body and "PA Screens" in task.ticket.body
+
+
+def test_no_customization_no_task():
+    assert "Customization" not in _titles(_plan())
+
+
+def test_customization_also_gets_a_monday_reminder_for_fulfillment():
+    plan = _custom_plan(["SRV-CUSB", "Customization: PA Screen for course 10781", "$0", "1", "$0"])
+    titles = _titles(plan)
+    assert titles.index("Add customization to Monday") == titles.index("Customization") + 1
+    task = _task(plan, "Add customization to Monday")
+    assert task.handled_by == ft.FULFILLMENT and task.ticket is None
+    assert "Course: 10781" in task.details and "Customization: PA Screen" in task.details
+
+
+# ---------------------------------------------------------------------------
+# Chubb Policyholder
+# ---------------------------------------------------------------------------
+
+def test_policyholder_needs_portal_creation_and_chubb_notification():
+    from tests.test_fulfillment_order_check import POLICYHOLDER_EMAIL
+    plan = ft.build_plan(oc.check_order(POLICYHOLDER_EMAIL, []), None)
+    assert [(t.title, t.handled_by) for t in plan.tasks] == [
+        ("Portal creation", ft.FULFILLMENT), ("Customer notification", ft.FULFILLMENT_TICKET)]
+    assert "Total number of users: 75" in _task(plan, "Portal creation").details
+    t = _task(plan, "Customer notification").ticket
+    assert t.subject == tk.CHUBB_SUBJECT
+    assert t.body == "Chubb Policyholder\n\nGLS-Hosted\n\nPOC: Jordan Smith, jsmith@example.com"
+    assert t.reply.startswith("Hello Jordan,\n\nThank you for registering")
+    assert "Website:\n[portal URL?]" in t.reply and "Username:\njsmith@example.com" in t.reply
+    assert "Arnie" in _task(plan, "Customer notification").confirm
+    assert not any("Course tasks" in h for h in plan.header)
+
+
+# ---------------------------------------------------------------------------
+# Spreadsheet rows
+# ---------------------------------------------------------------------------
+
+def test_sheet_rows_one_per_task_mine_completed_others_assigned():
+    from datetime import date
+    sow = _renewal_sow()
+    sow.text += "\nPrepared by:\nNatalie Williams"
+    plan = _plan(sow=sow)
+    rows = ft.sheet_rows(plan, date(2026, 11, 24))
+    assert [r[3] for r in rows] == ["Portal Exp", "License Change", "Content Add", "Archive",
+                                    "Comms Materials", "Customer Notification"]
+    assert rows[0] == ["16842", "Example Co (EXC)", "Natalie", "Portal Exp", "Completed", "Kathleen",
+                       "", "11/24/2026", "11/24/2026", ""]
+    assert rows[1][4:9] == ["Assigned", "Support", "", "11/24/2026", ""]
+    text = ft.format_sheet_rows(rows)
+    assert text.count("\n") == len(rows) - 1 and text.splitlines()[0].count("\t") == 9
+
+
+def test_sheet_order_ref_for_policyholder_and_no_cost_change_order():
+    from datetime import date
+    from tests.test_fulfillment_order_check import POLICYHOLDER_EMAIL
+    plan = ft.build_plan(oc.check_order(POLICYHOLDER_EMAIL, []), None)
+    rows = ft.sheet_rows(plan, date(2026, 11, 24))
+    assert [(r[0], r[1], r[3]) for r in rows] == [
+        ("Chubb Policyholder", "Example Holdings LLC", "Portal Creation"),
+        ("Chubb Policyholder", "Example Holdings LLC", "Customer Notification")]
+    no_number = _estimate()
+    no_number.text = no_number.text.replace("Estimate 16842\n", "")
+    plan = _change_plan(estimate=no_number, keep={"10781"})
+    assert {r[0] for r in ft.sheet_rows(plan)} == {"No-cost CO"}
+
+
+def test_sheet_owners_bob_for_sso_vineet_for_customization_and_open_implementation():
+    from datetime import date
+    est = [ESTIMATE_TABLES[0] + [["DL-SSO Single Sign On Annual Subscription: Azure AD", "1", "0", "0"]]]
+    sow = [SOW_TABLES[0] + [["SRV-CUSB", "Customization: PA Screen 10781", "$0", "1", "$0"]], SOW_TABLES[1]]
+    sow = _renewal_sow(sow)
+    sow.text = sow.text.replace("2026 RENEWAL PROPOSAL", "New Client")
+    plan = _plan(sow=sow, estimate=_estimate(tables=est))
+    rows = {r[3] + ("/monday" if r[5] == "Kathleen" and r[3] == "Customization" else ""): r
+            for r in ft.sheet_rows(plan, date(2026, 11, 24))}
+    assert rows["SSO"][4:6] == ["Assigned", "Bob"]
+    assert rows["Customization"][4:6] == ["Assigned", "Vineet"]
+    assert rows["Customization/monday"][4:6] == ["Completed", "Kathleen"]
+    assert rows["Implementation"][4:9] == ["Assigned", "Kathleen", "", "11/24/2026", ""]
+    assert all(r[5] != "Sales Rep" for r in rows.values())

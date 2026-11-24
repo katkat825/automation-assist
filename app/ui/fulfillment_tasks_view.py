@@ -78,6 +78,11 @@ class TasksView(QWidget):
 
         row = QHBoxLayout()
         row.addStretch()
+        sheet = make_button("Copy for spreadsheet",
+                            lambda _=False: _copy(ft.format_sheet_rows(ft.sheet_rows(self._plan))))
+        sheet.setToolTip("One tab-separated row per task: " + ", ".join(ft.SHEET_COLUMNS)
+                         + ". Paste into the first empty row of your tracking spreadsheet.")
+        row.addWidget(sheet)
         row.addWidget(make_button("Copy all", lambda _=False: _copy(ft.format_plan(self._plan))))
         layout.addLayout(row)
         self.clear()
